@@ -1,8 +1,20 @@
-module Ra where
-  import Extra (***)
+module Ra (
+  Sym,
+  SymTable,
+  StackTable,
+  StackBranch,
+  bind_to_table,
+  pat_match,
+  reduce_deep,
+  reduce1
+) where
+  import Data.Generics
+  import Data.Generics.Extra
+  import Data.Tuple.Extra (***)
   import Data.Function.Syntax (*.)
-  import qualified Ra.Refs as Refs
   
+  import qualified Ra.Refs as Refs
+  import Ra.GHC (GRHS_exprs, GRHS_binds)
   
   -- Note about making SymTables from bindings: `Fun` needs to be lifted to `HsExpr` through the `HsLam` constructor. This is to unify the type of the binding to `HsExpr` while retaining MatchGroup which is necessary at HsApp on a named function.
   type Sym = (Maybe SymTable, HsExpr Id)
