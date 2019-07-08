@@ -19,7 +19,7 @@ module Ra (
   -- Note about making SymTables from bindings: `Fun` needs to be lifted to `HsExpr` through the `HsLam` constructor. This is to unify the type of the binding to `HsExpr` while retaining MatchGroup which is necessary at HsApp on a named function.
   type Sym = (Maybe SymTable, HsExpr Id)
   type SymTable = Map Id [Sym] -- the list is of a symbol table for partial function apps, and the expression.
-  type StackTable = Tree (Map Id SymTable) -- One entry for every level deep and every invokation in a stack frame, so separate invokations of the same function can be distinguished
+  type StackTable = Tree (Id, SymTable) -- One entry for every level deep and every invokation in a stack frame, so separate invokations of the same function can be distinguished
   type StackBranch = [StackTable] -- nodes: consecutive ones are child-parent
   -- consider making alternative so the merge operation is more idiomatically `<|>`
   
