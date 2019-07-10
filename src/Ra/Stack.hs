@@ -4,7 +4,6 @@ module Ra.Stack (
   SetForest,
   Sym(..),
   SymTable(..),
-  StackFrame(..),
   StackBranch,
   merge_branches,
   merge_sym_tables,
@@ -15,6 +14,7 @@ module Ra.Stack (
   import Data.Coerce (coerce)
   import Data.Map.Strict (Map, unionsWith)
   import Data.Set (Set)
+  import Control.Exception (assert)
   
   data SetTree v = Node {
     rootLabel :: v,
@@ -34,8 +34,6 @@ module Ra.Stack (
   mksym :: HsExpr Id -> Sym
   mksym = Sym . (Nothing,)
   
-  type StackFrame = (Maybe Id, SymTable)
-  
   -- data StackFrame = Frame {
   --   sf_id :: Maybe Id,
   --   sf_table :: SymTable
@@ -47,10 +45,18 @@ module Ra.Stack (
     
   -- type StackTable = SetTree StackFrame -- One entry for every level deep and every invokation in a stack frame, so separate invokations of the same function can be distinguished
   type StackBranch = [(SrcSpan, SymTable)] -- nodes: consecutive ones are child-parent
+  clear_branch :: StackBranch -> StackBranch
+  clear_branch = map (second (const $ SymTable empty))
+  update_head_table :: StackBranch -> SymTable -> StackBranch
+  update_head_table next_table = update_head (second (merge_sym_tables . (:[next_table])))
   -- consider making alternative so the merge operation is more idiomatically `<|>`
   
-  merge_branches :: [StackBranch] -> StackBranch
-  merge_branches = undefined -- TODO the implementation around this needs to be changed, as I've realized that many updates will compete, with no bearing on which elements have been pushed closed to normal form
+  union_branches :: [StackBranch] -> StackBranch
+  union_branches = 
+    let folder (Just (a_src, a_table)) (Just b@(b_src, b_table)) = assert (a_src == b_src) (second (union a_table) b) -- prefer first (accumulating) branch
+        folder Nothing b = b
+        folder a Nothing = a
+    in foldl1 ((folder.) . zipAll)  -- TODO the implementation around this needs to be changed, as I've realized that many updates will compete, with no bearing on which elements have been pushed closer to normal form
   
-  merge_sym_tables :: [SymTable] -> SymTable
-  merge_sym_tables = coerce . unionsWith (++) . map (coerce :: SymTable -> Map Id [Sym]) -- TODO check if we need to be more sophisticated than this crude merge
+  union_sym_tables :: [SymTable] -> SymTable
+  union_sym_tables = SymTable . unionsWith (++) . map coerce -- TODO check if we need to be more sophisticated than this crude merge

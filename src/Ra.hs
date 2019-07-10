@@ -46,14 +46,14 @@ pat_multi_match ::
   -> StackBranch -- full symbol table
   -> Sym
   -> [Pat Id]
-  -> SymTable
+  -> StackBranch
 pat_multi_match expand branch expr pats =
   let (table', values) = reduce_deep branch expr []
-  in merge_sym_tables $ values & map (\(Sym (parts, expr)) ->
+  in union_sym_tables $ values & map (\(Sym (parts, expr)) ->
     case expand expr of
       Just args | let arg_matches :: [SymTable]
                       arg_matches = map (uncurry (pat_match branch . mksym)) (zip args pats)
-                , and $ map (\(SymTable t) -> not $ M.null t) arg_matches -> merge_sym_tables arg_matches -- should be disjoint bindings because the args contribute different variables
+                , and $ map (\(SymTable t) -> not $ M.null t) arg_matches -> union_sym_tables arg_matches -- should be disjoint bindings because the args contribute different variables
       Nothing -> SymTable empty
   )
 
@@ -62,7 +62,7 @@ pat_match ::
   StackBranch
   -> Sym
   -> Pat Id
-  -> SymTable
+  -> StackBranch -- the _difference_ in each stack frame
 -- all new matches from the pat match; empty denotes the match failed (we'll bind wildcards under `_` which will be ignored later since it's an illegal variable and function name)
 -- Valid HsExpr: HsApp, OpApp, NegApp, ExplicitTuple, ExplicitList, (SectionL, SectionR) (for data types that are named by operators, e.g. `:`; I might not support this in v1 because it's so thin)
 -- Valid Pat: 
@@ -72,17 +72,18 @@ pat_match branch sym@(Sym (m_parts, expr)) = \case
   WildPat ty ->
     let fake_name = mkSystemName (mkVarOccUnique $ mkFastString "_") (mkVarOcc "_")
         fake_var = mkLocalVar VanillaId fake_name ty vanillaIdInfo
-    in SymTable $ singleton fake_var [Sym (Nothing, expr)]
+        next_table = SymTable $ singleton fake_var [Sym (Nothing, expr)]
+    in update_head_table next_table (clear_branch branch)
   -- wrapper
   LazyPat (L _ pat) -> pat_match branch sym pat
   ParPat (L _ pat) -> pat_match branch sym pat
   BangPat (L _ pat) -> pat_match branch sym pat
   SigPatOut (L _ pat) _ -> pat_match branch sym pat
   -- base
-  VarPat (L _ v) -> coerce $ singleton v [Sym (Nothing, expr)]
+  VarPat (L _ v) -> update_head_table (SymTable singleton v [Sym (Nothing, expr)]) (clear_branch branch)
   -- container
-  ListPat pats _ _ -> merge_sym_tables $ map (pat_match branch sym . unLoc) pats -- encodes the logic that all elements of a list might be part of the pattern regardless of order -- TODO: is this the right branch? Should it be reduced?
-  AsPat (L _ bound) (L _ pat) -> merge_sym_tables [
+  ListPat pats _ _ -> union_branches $ map (pat_match branch sym . unLoc) pats -- encodes the logic that all elements of a list might be part of the pattern regardless of order -- TODO: is this the right branch? Should it be reduced?
+  AsPat (L _ bound) (L _ pat) -> union_sym_tables [
       SymTable $ singleton bound [sym]
       , pat_match branch (mksym expr) pat
     ] -- NB this should also be disjoint (between the binding and the internal pattern); just guard in case
@@ -125,31 +126,31 @@ reduce_deep branch (Sym (m_parts, expr)) nf_args = case expr of
            , not $ loc `elem` map fst branch -> 
     let pat_matches :: SymTable
         pat_matches =
-          merge_sym_tables $ (unLoc $ mg_alts mg) & concatMap ( -- over function body alternatives
+          union_branches $ (unLoc $ mg_alts mg) & concatMap ( -- over function body alternatives
             map ( -- over arguments
-              merge_sym_tables . map ( -- over possible expressions
+              union_sym_tables . map ( -- over possible expressions
                 uncurry (pat_match undefined) -- TODO which branch?
               ) . (uncurry zip) . (id *** repeat)
             ) . zip nf_args . map unLoc . m_pats . unLoc -- `nf_args` FINALLY USED HERE
           )
-        next_arg_binds = merge_sym_tables (pat_matches : (maybeToList m_parts))
+        next_arg_binds = union_sym_tables (pat_matches : (maybeToList m_parts))
     in if matchGroupArity mg < length nf_args
       then (undefined, [Sym (Just next_arg_binds, HsLam (mg_drop (length nf_args) mg))]) -- partial -- TODO figure out what branch should go there; is it `branch`?
       else
         let next_explicit_binds = grhs_binds mg
             next_exprs = grhs_exprs mg
-            next_frame = (loc, merge_sym_tables [next_explicit_binds, next_arg_binds])
+            next_frame = (loc, union_sym_tables [next_explicit_binds, next_arg_binds])
             next_branch = next_frame : branch -- TODO figure out what branch should go there
             next_args = map (drop (length nf_args - matchGroupArity mg)) nf_args
-        in (merge_branches *** concat) $ unzip $ map (flip (reduce_deep next_branch) next_args . mksym) next_exprs -- TODO figure out if branch needs to be advanced here
+        in (union_branches *** concat) $ unzip $ map (flip (reduce_deep next_branch) next_args . mksym) next_exprs -- TODO figure out if branch needs to be advanced here
         
   HsVar (L _ v) | Just left_exprs <- foldr ((<|>) . (!?v) . coerce . snd) Nothing branch ->
     let flatten :: [(StackBranch, [a])] -> (StackBranch, [a])
-        flatten = foldr (\(a, b) (a', b') -> (merge_branches [a, a'], b ++ b')) ([], []) -- sometimes pointfree isn't worth it
-        -- flatten = foldr (uncurry (***) . (((merge_branches.) . flip (:) . pure) *** (++))) ([], []) -- not going to lie, the point-free here is a bit ridiculous
+        flatten = foldr (\(a, b) (a', b') -> (union_branches [a, a'], b ++ b')) ([], []) -- sometimes pointfree isn't worth it
+        -- flatten = foldr (uncurry (***) . (((union_branches.) . flip (:) . pure) *** (++))) ([], []) -- not going to lie, the point-free here is a bit ridiculous
         (left_branch, nf_left) = flatten $ map ( -- over all expressions `v` took on
             flatten . map (($nf_args) . uncurry reduce_deep) . uncurry zip . ( -- over all new expressions from reduce1
-              repeat . (flip update_head branch {- should this be `branch`? -}) . second . (merge_sym_tables.) . flip (:) . pure -- make many copies of the branch unioned with the new binds from reduce1 -- TODO don't quite remember if update_head was on the new entry, or the old one `branch`. Either way, bigger-picture I have to sort all this crap out about returning only a delta
+              repeat . (flip update_head branch {- should this be `branch`? -}) . second . (union_sym_tables.) . flip (:) . pure -- make many copies of the branch unioned with the new binds from reduce1 -- TODO don't quite remember if update_head was on the new entry, or the old one `branch`. Either way, bigger-picture I have to sort all this crap out about returning only a delta
               *** id
             ) . reduce1 branch
           ) left_exprs -- BOOKMARK The whole StackBranch structure is a little screwy, because all of them should eventually lead to lambdas except for unresolvable bindings. Therefore, 
