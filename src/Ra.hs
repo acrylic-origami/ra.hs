@@ -46,7 +46,7 @@ pat_multi_match ::
   -> StackBranch -- full symbol table
   -> Sym
   -> [Pat Id]
-  -> StackBranch
+  -> SymTable
 pat_multi_match expand branch expr pats =
   let (table', values) = reduce_deep branch expr []
   in union_sym_tables $ values & map (\(Sym (parts, expr)) ->
@@ -62,7 +62,7 @@ pat_match ::
   StackBranch
   -> Sym
   -> Pat Id
-  -> StackBranch -- the _difference_ in each stack frame
+  -> SymTable -- the new bindings in _this stack frame only_, even if new ones are resolved above and below
 -- all new matches from the pat match; empty denotes the match failed (we'll bind wildcards under `_` which will be ignored later since it's an illegal variable and function name)
 -- Valid HsExpr: HsApp, OpApp, NegApp, ExplicitTuple, ExplicitList, (SectionL, SectionR) (for data types that are named by operators, e.g. `:`; I might not support this in v1 because it's so thin)
 -- Valid Pat: 
@@ -112,7 +112,7 @@ pat_match branch sym@(Sym (m_parts, expr)) = \case
     --   in unions $ map (deapp . bool () (tie (table))) (snd tied)
     RecCon _ -> error "Record syntax yet to be implemented"
 
-reduce_deep :: StackBranch -> Sym -> [[Sym]] -> (StackBranch, [Sym]) -- is this Expr <-> Sym asymmetry okay in the arg/return okay?
+reduce_deep :: StackBranch -> Sym -> [[Sym]] -> [Sym]
 -- TODO this error bank is getting pretty ugly on account of Sym and the repeated arguments of application. Consider refactor.
 reduce_deep _ (Sym (_, HsConLikeOut _)) (_:_) = error "Only bare ConLike should make it to `reduce_deep`"
 reduce_deep _ (Sym (_, HsOverLit _)) (_:_) = error "Application on OverLit"
