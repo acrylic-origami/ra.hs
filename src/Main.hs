@@ -4,7 +4,7 @@ module Main where
   import GHC.Paths (libdir)
   import Data.Map.Strict
   import Outputable
-  import Ra ( bind_to_table, pat_match, reduce_deep, reduce1 )
+  import Ra ( bind_to_table, pat_match, reduce_deep )
 
   main :: IO ()
   main = runGhc (Just libdir) $ do
