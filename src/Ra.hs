@@ -151,22 +151,22 @@ reduce_deep branch expr args =
     
     HsLam mg | let loc = getLoc $ mg_alts mg -- <- NB this is why the locations of MatchGroups don't matter
              , not $ loc `elem` map fst branch -> -- beware about `noLoc`s showing up here: maybe instead break out the pattern matching code
-      let pat_matches :: SymTable
-          pat_matches =
-            union_sym_tables $ (unLoc $ mg_alts mg) & concatMap ( -- over function body alternatives
-              map ( -- over arguments
-                union_sym_tables . map ( -- over possible expressions
-                  uncurry (pat_match branch) -- share the same branch
-                ) . (uncurry zip) . (id *** repeat)
-              ) . zip args . map unLoc . m_pats . unLoc -- `args` FINALLY USED HERE
-            )
-          next_arg_binds = union_sym_tables (pat_matches : (maybeToList m_parts))
-      in if matchGroupArity mg > length args
-        then [Sym (Just next_arg_binds, HsLam (mg_drop (length args) mg))] -- partial; how to locate so it doesn't blow up?
+      if matchGroupArity mg > length args
+        then terminal
         else
-          let next_explicit_binds = grhs_binds branch mg
+          let pat_matches :: SymTable
+              pat_matches =
+                union_sym_tables $ (unLoc $ mg_alts mg) & concatMap ( -- over function body alternatives
+                  map ( -- over arguments
+                    union_sym_tables . map ( -- over possible expressions
+                      uncurry (pat_match branch) -- share the same branch
+                    ) . (uncurry zip) . (id *** repeat)
+                  ) . zip args . map unLoc . m_pats . unLoc -- `args` FINALLY USED HERE
+                )
+              
+              next_explicit_binds = grhs_binds branch mg
               next_exprs = grhs_exprs mg
-              next_frame = (loc, union_sym_tables [next_explicit_binds, next_arg_binds])
+              next_frame = (loc, union_sym_tables [next_explicit_binds, pat_matches])
               next_branch = next_frame : branch
               next_args = drop (matchGroupArity mg) args
           in concatMap (flip (reduce_deep next_branch) next_args) next_exprs
