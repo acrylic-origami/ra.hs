@@ -1,6 +1,5 @@
 {-# LANGUAGE LambdaCase, NamedFieldPuns #-}
 module Main where
-  import Data.Coerce ( coerce )
   import GHC
   import GHC.Paths ( libdir )
   import Var ( Var )
@@ -15,7 +14,7 @@ module Main where
   
   import Ra ( pat_match, reduce_deep )
   import Ra.GHC ( bind_to_table )
-  import Ra.Stack ( SymTable(..), Sym(..), show_sym, show_table, mksym )
+  import Ra.Stack ( SymTable, Sym )
 
   import Outputable ( Outputable, interppSP, showSDocUnsafe )
 
@@ -40,10 +39,10 @@ module Main where
     -- return $ show $ map (showPpr dflags) ((concat $ shallowest cast (last tl_binds)) :: [HsExpr Id]) -- ) []
     
     let tl_binds = bagToList (typecheckedSource t)
-        initial_branch = [(noSrcSpan, SymTable $ unionsWith (++) $ map (coerce . bind_to_table ([(noSrcSpan, SymTable M.empty)]) . unLoc) tl_binds)]
-    return $ show $ map (show_sym dflags) $ concatMap (flip (reduce_deep $ initial_branch) [] . mksym) ((concat $ shallowest cast (last tl_binds)) :: [HsExpr Id])
+        initial_branch = [(noSrcSpan, unionsWith (++) $ map (bind_to_table ([(noSrcSpan, M.empty)]) . unLoc) tl_binds)]
+    return $ show $ map (showPpr dflags) $ concatMap (flip (reduce_deep $ initial_branch) []) ((concat $ shallowest cast (last tl_binds)) :: [HsExpr Id])
     
-    return $ show $ map (show_sym dflags) $ concatMap (flip (reduce_deep $ [(noSrcSpan, SymTable $ unionsWith (++) $ map (coerce . bind_to_table ([(noSrcSpan, SymTable M.empty)]) . unLoc) $ bagToList (typecheckedSource t))]) [] . mksym) ((concat $ shallowest cast (last $ bagToList (typecheckedSource t))) :: [HsExpr Id])
+    -- return $ show $ map (show_sym dflags) $ concatMap (flip (reduce_deep $ [(noSrcSpan, SymTable $ unionsWith (++) $ map (bind_to_table ([(noSrcSpan, SymTable M.empty)]) . unLoc) $ bagToList (typecheckedSource t))]) []) ((concat $ shallowest cast (last $ bagToList (typecheckedSource t))) :: [HsExpr Id])
     
     -- return $ foldr1 ((++) . ('\n':)) $ map (\x -> (show $ getUnique x) ++ " | " ++ (showPpr dflags x)) $ (everything (++) ([] `mkQ` ((pure . id) :: Id -> [Id])) tl_binds)
     -- return $ everything_ppr ((show . toConstr) `extQ` ((uncurry ((++) . (++" | ")) . (showPpr dflags &&& show . getUnique)) :: Id -> String)) tl_binds
