@@ -175,8 +175,8 @@ reduce_deep branch expr args =
       let flatten :: [(StackBranch, [a])] -> (StackBranch, [a])
           flatten = foldr (\(a, b) (a', b') -> (union_branches [a, a'], b ++ b')) ([], []) -- sometimes pointfree isn't worth it
           -- flatten = foldr (uncurry (***) . (((union_branches.) . flip (:) . pure) *** (++))) ([], []) -- not going to lie, the point-free here is a bit ridiculous
-          nf_left = concatMap (flip (reduce_deep branch) args) left_exprs -- TODO The whole StackBranch structure is a little screwy, because all of them should eventually lead to lambdas except for unresolvable bindings. Therefore, 
-      in foldr ((++) . flip (reduce_deep branch) args) [] nf_left
+      in concatMap (flip (reduce_deep branch) args) left_exprs -- TODO The whole StackBranch structure is a little screwy, because all of them should eventually lead to lambdas except for unresolvable bindings. Therefore, 
+      -- in foldr ((++) . flip (reduce_deep branch) args) [] nf_left
     HsVar _ -> terminal
       
     HsApp _ _ ->
