@@ -1,3 +1,4 @@
+{-# LANGUAGE Rank2Types #-}
 module Ra.GHC (
   grhs_exprs,
   grhs_binds,
@@ -14,6 +15,6 @@ import Ra.Extra
 
 bind_to_table :: StackBranch -> HsBind Id -> SymTable
 grhs_exprs :: GenericQ [HsExpr Id]
-grhs_binds :: GenericQ SymTable
+grhs_binds :: StackBranch -> GenericQ SymTable
 mg_drop :: Int -> MatchGroup Id (LHsExpr Id) -> MatchGroup Id (LHsExpr Id)
 mg_flip :: MatchGroup Id (LHsExpr Id) -> MatchGroup Id (LHsExpr Id)

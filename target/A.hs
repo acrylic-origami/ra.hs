@@ -1,8 +1,13 @@
 module A where
-foo :: a -> a
-foo = \x -> x
 
-bar :: a -> a -> a
-bar a b = case True of
-  True -> a
-  _ -> b
+data D a b = D a b
+  
+foo :: Int -> D Int Int
+foo _ = bar 3 where
+  bar x = case x of
+    4 | (c, d) <- (\x -> x + 6, (+5))
+      , let e = 42 -> if 8 > 7 then D (c 9) e else (\x -> D (d 10) x) e
+
+quux = D 3 4
+
+baz = foo 2

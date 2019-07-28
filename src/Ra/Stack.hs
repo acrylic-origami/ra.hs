@@ -8,14 +8,18 @@ module Ra.Stack (
   branch_lookup,
   union_branches,
   union_sym_tables,
-  mksym
+  mksym,
+  show_sym,
+  show_table
 ) where
   
 import GHC
+import Outputable (showPpr)
 
-import Data.Tuple.Extra ( second )
+import Data.Tuple.Extra ( second, (***) )
 import Data.Coerce ( coerce )
-import Data.Map.Strict ( Map(..), empty, union, unionsWith, (!?) )
+import Data.Map.Strict ( Map(..), empty, union, unionsWith, toList, fromList, (!?) )
+import qualified Data.Map.Strict as M ( map, mapWithKey )
 import Data.Set ( Set(..) )
 import Control.Applicative ( (<|>) )
 import Control.Exception ( assert )
@@ -35,7 +39,11 @@ type SetForest v = Set (SetTree v)
 -- Note about making SymTables from bindings: `Fun` needs to be lifted to `HsExpr` through the `HsLam` constructor. This is to unify the type of the binding to `HsExpr` while retaining MatchGroup which is necessary at HsApp on a named function.
 newtype Sym = Sym (Maybe SymTable, HsExpr Id)
 newtype SymTable = SymTable (Map Id [Sym]) -- the list is of a symbol table for partial function apps, and the expression.
--- ah crap, lambdas. these only apply to IIFEs, but still a pain. 
+-- ah crap, lambdas. these only apply to IIFEs, but still a pain.
+show_sym :: DynFlags -> Sym -> String
+show_sym dflags = show . (((show_table dflags)<$>) *** showPpr dflags) . (\(Sym a) -> a)
+show_table :: DynFlags -> SymTable -> String
+show_table dflags = show . fromList . map (showPpr dflags *** map (show_sym dflags)) . toList . (\(SymTable t) -> t)
 
 mksym :: HsExpr Id -> Sym
 mksym = Sym . (Nothing,)
