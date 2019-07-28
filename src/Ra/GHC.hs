@@ -26,7 +26,7 @@ bind_to_table branch b = case b of
   PatBind { pat_lhs = L _ pat_lhs, pat_rhs } ->
     let branch' = update_head (second (union_sym_tables . (:[grhs_binds branch pat_rhs]))) branch
         next_exprs = grhs_exprs pat_rhs
-        next_tables = map (flip (pat_match branch') pat_lhs) next_exprs
+        next_tables = map (pat_match branch' pat_lhs) next_exprs
     in union_sym_tables next_tables
   VarBind{} -> empty
   _ -> error $ constr_ppr b

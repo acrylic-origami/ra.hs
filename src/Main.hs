@@ -40,7 +40,7 @@ module Main where
     
     let tl_binds = bagToList (typecheckedSource t)
         initial_branch = [(noSrcSpan, unionsWith (++) $ map (bind_to_table ([(noSrcSpan, M.empty)]) . unLoc) tl_binds)]
-    return $ show $ map (showPpr dflags) $ concatMap (flip (reduce_deep $ initial_branch) []) ((concat $ shallowest cast (last tl_binds)) :: [HsExpr Id])
+    return $ show $ map (showPpr dflags) $ concatMap (reduce_deep initial_branch []) ((concat $ shallowest cast (last tl_binds)) :: [HsExpr Id])
     
     -- return $ show $ map (show_sym dflags) $ concatMap (flip (reduce_deep $ [(noSrcSpan, SymTable $ unionsWith (++) $ map (bind_to_table ([(noSrcSpan, SymTable M.empty)]) . unLoc) $ bagToList (typecheckedSource t))]) []) ((concat $ shallowest cast (last $ bagToList (typecheckedSource t))) :: [HsExpr Id])
     

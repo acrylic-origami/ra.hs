@@ -56,7 +56,7 @@ clear_branch :: StackBranch -> StackBranch
 clear_branch = map (second (const empty))
 update_head_table :: SymTable -> StackBranch -> StackBranch
 update_head_table next_table = update_head (second (union_sym_tables . (:[next_table])))
--- consider making alternative so the merge operation is more idiomatically `<|>`
+-- consider making Alternative so the merge operation is more idiomatically `<|>`
 
 union_branches :: [StackBranch] -> StackBranch
 union_branches = 
