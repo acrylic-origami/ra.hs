@@ -12,7 +12,7 @@ module Main where
   import qualified Data.Map.Strict as M ( empty )
   import Data.Tuple.Extra ( (&&&) )
   
-  import Ra ( pat_match, reduce_deep, reduce_full )
+  import Ra ( pat_match, reduce_deep )
   import Ra.GHC ( bind_to_table )
   import Ra.Stack ( SymTable, Sym )
 

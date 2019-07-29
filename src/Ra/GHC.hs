@@ -40,6 +40,10 @@ grhs_binds :: StackBranch -> GenericQ SymTable
 grhs_binds branch = union_sym_tables . everythingBut (++) (
     ([empty], False)
     `mkQ` ((,False) . pure . bind_to_table branch)
+    `extQ` ((,False) . ((\case
+        BindStmt (L _ pat) (L _ expr) _ _ _ -> [pat_match branch pat expr]
+        _ -> []
+        ) . unLoc :: LStmt Id (LHsExpr Id) -> [SymTable]))
     `extQ` (([empty],) . ((\case 
       HsApp _ _ -> True
       HsLam _ -> True
