@@ -105,9 +105,8 @@ pat_match branch pat expr = case pat of
       
   ConPatOut{ pat_con = L _ (RealDataCon pat_con'), pat_args = d_pat_args } -> case d_pat_args of
     PrefixCon pats ->
-      let matcher x | let (con, args) = deapp x -- x is in NF thanks to pat_multi_match; this assumes it
-                    , HsVar (L _ id) <- con
-                    , varName id == dataConName pat_con' = Just args
+      let matcher x | (HsConLikeOut (RealDataCon con), args) <- deapp x -- x is in NF thanks to pat_multi_match; this assumes it
+                    , dataConName con == dataConName pat_con' = Just args
                     | otherwise = Nothing
       in pat_multi_match matcher branch (map unLoc pats) expr
     
