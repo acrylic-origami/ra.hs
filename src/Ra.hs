@@ -133,7 +133,7 @@ reduce_deep _ (_:_) (ExplicitTuple _ _) = error "Application on ExplicitTuple"
 reduce_deep branch args expr =
   let terminal =
         -- assert (isNothing m_parts) $
-        foldl (\ress args' -> [HsApp (noLoc res) (noLoc arg) | res <- ress, arg <- args' ]) [expr] args -- TODO fishy information loss here on the Sym -> expr conversion; we may need to keep the bindings from any partials, even if it's terminal. This might be temporary anyways
+        foldl (\ress args' -> [HsApp (noLoc res) (noLoc arg) | res <- ress, arg <- concatMap (reduce_deep branch []) args' ]) [expr] args -- TODO fishy information loss here on the Sym -> expr conversion; we may need to keep the bindings from any partials, even if it's terminal. This might be temporary anyways
       unravel1 = reduce_deep branch args
       unravel :: [HsExpr Id] -> [Sym]
       unravel = concatMap (reduce_deep branch args)
