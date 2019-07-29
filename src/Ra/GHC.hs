@@ -12,7 +12,8 @@ import Bag
 import Data.Generics ( everythingBut, GenericQ, cast, mkQ, extQ )
 import Data.Generics.Extra ( shallowest, constr_ppr )
 import Data.Tuple.Extra ( second, (&&&) )
-import Data.Map.Strict ( unionWith, unionsWith, insert, singleton, empty )
+import Data.Maybe ( catMaybes )
+import Data.Map.Strict ( unionWith, unionsWith, insert, singleton, empty, fromList, (!?) )
 
 import Ra ( pat_match )
 import Ra.Stack ( Sym, SymTable, StackBranch, union_sym_tables )
@@ -20,7 +21,9 @@ import Ra.Extra
 
 bind_to_table :: StackBranch -> HsBind Id -> SymTable
 bind_to_table branch b = case b of
-  AbsBinds { abs_binds } -> union_sym_tables $ bagToList $ mapBag (bind_to_table branch . unLoc) abs_binds -- consider making union_sym_table just Foldable t => ...
+  AbsBinds { abs_exports, abs_binds } ->
+    let subbinds = union_sym_tables $ bagToList $ mapBag (bind_to_table branch . unLoc) abs_binds -- consider making union_sym_table just Foldable t => ...
+    in unionWith (++) subbinds $ fromList $ catMaybes $ map (\expr -> (abe_poly expr,) <$> (subbinds !? abe_mono expr)) abs_exports
   AbsBindsSig { abs_sig_export, abs_sig_bind = L _ abs_sig_bind } -> uncurry (insert abs_sig_export) $ (foldr (++) [] &&& id) $ bind_to_table branch abs_sig_bind
   FunBind { fun_id = L _ fun_id, fun_matches } -> singleton fun_id [HsLam fun_matches]
   PatBind { pat_lhs = L _ pat_lhs, pat_rhs } ->
