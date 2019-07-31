@@ -6,20 +6,23 @@ module Main where
   import Unique ( getUnique )
   import Bag ( bagToList )
   import qualified Data.Map.Strict as M
-  import Data.Map.Strict ( unionsWith, keys )
+  import Data.Map.Strict ( unionsWith, keys, toList )
   import Data.Generics ( cast, mkQ, extQ, everything, toConstr, Data(..) )
   import Data.Generics.Extra ( constr_ppr, shallowest, everything_ppr )
   import qualified Data.Map.Strict as M ( empty )
-  import Data.Tuple.Extra ( (&&&) )
+  import Data.Tuple.Extra ( (&&&), (***) )
   
   import Ra ( pat_match, reduce_deep )
   import Ra.GHC ( bind_to_table )
-  import Ra.Stack ( SymTable, Sym )
+  import Ra.Stack ( SymTable, Sym, StackBranch )
 
   import Outputable ( Outputable, interppSP, showSDocUnsafe, showPpr )
 
   ppr :: Outputable a => a -> String
   ppr = showSDocUnsafe . interppSP . pure
+  
+  ppr_branch :: StackBranch -> String
+  ppr_branch = foldr ((++) . (++"---\n\n") . foldr ((++) . (++"\n\n") . uncurry (++) . (((++", ") . ppr) *** ppr)) "" . toList . snd) ""
 
   main :: IO ()
   main = (putStrLn=<<) $ runGhc (Just libdir) $ do
@@ -53,7 +56,7 @@ module Main where
     
     -- return $ foldr1 ((++) . ('\n':)) $ map (\x -> (show $ getUnique x) ++ " | " ++ (showPpr dflags x)) $ (everything (++) ([] `mkQ` ((pure . id) :: Id -> [Id])) tl_binds)
     -- return $
-    --   everything_ppr ((show . toConstr) `extQ` ((uncurry ((++) . (++" | ")) . (showPpr dflags &&& show . getUnique)) :: Id -> String)) tl_binds
+      -- everything_ppr ((show . toConstr) `extQ` ((uncurry ((++) . (++" | ")) . (showPpr dflags &&& show . getUnique)) :: Id -> String)) tl_binds
     --   ++ "\n"
     --   ++ (everything (++) ([] `mkQ` ((\expr -> case expr of { (HsVar (L _ v)) -> (showPpr dflags expr ++ " | " ++ (show $ varUnique v)) ++ "\n"; _ -> "" }))) $ concatMap (reduce_deep initial_branch []) ((concat $ shallowest cast (last tl_binds)) :: [HsExpr Id]))
       

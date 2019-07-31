@@ -1,5 +1,7 @@
 module D where
 
 -- foo | Just a <- Just 42 = a + 3
-baz | (a, b) <- (\x -> x 2, \y -> y + 1) = a b
+baz = baq where
+  baq | let a = 42 = baw a
+  baw x = x
 bar = baz

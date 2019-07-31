@@ -39,7 +39,7 @@ grhs_exprs x = map (\(L _ (GRHS _ body) :: LGRHS Id (LHsExpr Id)) -> unLoc body)
 grhs_binds :: StackBranch -> GenericQ SymTable
 grhs_binds branch = union_sym_tables . everythingBut (++) (
     ([empty], False)
-    `mkQ` ((,False) . pure . bind_to_table branch)
+    `mkQ` ((,True) . pure . bind_to_table branch)
     `extQ` ((,False) . ((\case
         BindStmt (L _ pat) (L _ expr) _ _ _ -> [pat_match branch pat expr]
         _ -> []

@@ -44,10 +44,10 @@ unHsWrap expr = case expr of
 
 deapp :: HsExpr Id -> (HsExpr Id, [HsExpr Id])
 deapp expr =
-  let unwrapped = unHsWrap expr in
-    case unwrapped of
-      HsApp l r -> (id *** (++[unLoc r])) (deapp $ unLoc l)
-      _ -> (unwrapped, [])
+  let unwrapped = unHsWrap expr
+  in case unwrapped of
+    HsApp l r -> (id *** (++[unLoc r])) (deapp $ unLoc l)
+    _ -> (unwrapped, [])
 
 app :: HsExpr Id -> [HsExpr Id] -> HsExpr Id
 app expr = foldl (curry (uncurry HsApp . both noLoc)) expr
@@ -166,7 +166,7 @@ reduce_deep branch args expr =
                 )
               
               next_explicit_binds = grhs_binds branch mg
-              next_exprs = grhs_exprs mg
+              next_exprs = grhs_exprs $ map (grhssGRHSs . m_grhss . unLoc) $ unLoc $ mg_alts mg
               next_frame = (loc, union_sym_tables [next_explicit_binds, pat_matches])
               next_branch = next_frame : branch
               next_args = drop (matchGroupArity mg) args
