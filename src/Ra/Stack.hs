@@ -1,43 +1,74 @@
 {-# LANGUAGE TupleSections #-}
 module Ra.Stack (
-  SetTree(..),
-  SetForest,
   Sym(..),
   SymTable(..),
   StackBranch,
   branch_lookup,
   union_branches,
   union_sym_tables,
+  ReduceSyms(..),
+  PatMatchSyms(..)
 ) where
-  
+
+
 import GHC
 import Outputable (showPpr)
 
 import Data.Tuple.Extra ( second, (***) )
 import Data.Coerce ( coerce )
-import Data.Map.Strict ( Map(..), empty, union, unionsWith, toList, fromList, (!?) )
+import Data.Map.Strict ( Map(..), empty, union, unionWith, unionsWith, toList, fromList, (!?) )
 import qualified Data.Map.Strict as M ( map, mapWithKey )
 import Data.Set ( Set(..) )
+import Data.Semigroup ( Semigroup(..), (<>) )
+import Data.Monoid ( Monoid(..), mempty, mconcat )
 import Control.Applicative ( (<|>) )
 import Control.Exception ( assert )
 
 import Ra.Extra ( update_head, zipAll )
 
-data SetTree v = Node {
-  rootLabel :: v,
-  subForest :: SetForest v
-}
-instance Eq a => Eq (SetTree a) where
-  (Node{ rootLabel = left }) == (Node{ rootLabel = right }) = left == right
-instance (Ord a) => Ord (SetTree a) where
-  (Node{ rootLabel = left }) <= (Node{ rootLabel = right }) = left <= right
-type SetForest v = Set (SetTree v)
-
 -- Note about making SymTables from bindings: `Fun` needs to be lifted to `HsExpr` through the `HsLam` constructor. This is to unify the type of the binding to `HsExpr` while retaining MatchGroup which is necessary at HsApp on a named function.
+
+-- class Symbol s where
+--   mksym :: HsExpr Id -> s
+--   unsym :: s -> HsExpr Id -- this seems really unidiomatic
+
+-- instance Symbol Sym where
+--   mksym = id
+--   unsym = id
+
+-- instance ReduceSyms 
+
 type Sym = HsExpr Id
 type SymTable = Map Id [Sym] -- the list is of a symbol table for partial function apps, and the expression.
 union_sym_tables = unionsWith (++)
 -- ah crap, lambdas. these only apply to IIFEs, but still a pain.
+
+type Pipe = SrcSpan -- LHsExpr Id
+data ReduceSyms = ReduceSyms {
+  rs_syms :: [Sym],
+  rs_writes :: Map Pipe [Sym]
+}
+
+data PatMatchSyms = PatMatchSyms {
+  pms_syms :: SymTable,
+  pms_writes :: Map Pipe [Sym]
+}
+
+instance Semigroup ReduceSyms where
+  (ReduceSyms lsyms lwrites) <> (ReduceSyms rsyms rwrites) = ReduceSyms (lsyms <> rsyms) (unionWith (++) lwrites rwrites) -- is there a nicer way to do this?
+  
+  -- vs. (<>) = curry $ uncurry ReduceSyms . ((uncurry (++) . fmap rs_syms) &&& (uncurry (unionWith (++)) . fmap rs_syms))
+
+instance Monoid ReduceSyms where
+  mempty = ReduceSyms mempty mempty
+  mappend = (<>)
+  
+instance Semigroup PatMatchSyms where
+  (PatMatchSyms lsyms lwrites) <> (PatMatchSyms rsyms rwrites) = PatMatchSyms (union_sym_tables [lsyms, rsyms]) (unionWith (++) lwrites rwrites)
+
+instance Monoid PatMatchSyms where
+  mempty = PatMatchSyms mempty mempty
+  mappend = (<>)
 
 -- data StackFrame = Frame {
 --   sf_id :: Maybe Id,

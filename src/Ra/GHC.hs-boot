@@ -10,11 +10,11 @@ module Ra.GHC (
 import GHC
 import Data.Generics
 
-import Ra.Stack ( SymTable, StackBranch )
+import Ra.Stack ( SymTable, PatMatchSyms, StackBranch )
 import Ra.Extra
 
-bind_to_table :: StackBranch -> HsBind Id -> SymTable
+bind_to_table :: StackBranch -> HsBind Id -> PatMatchSyms
 grhs_exprs :: GenericQ [HsExpr Id]
-grhs_binds :: StackBranch -> GenericQ SymTable
+grhs_binds :: StackBranch -> GenericQ PatMatchSyms
 mg_drop :: Int -> MatchGroup Id (LHsExpr Id) -> MatchGroup Id (LHsExpr Id)
 mg_flip :: MatchGroup Id (LHsExpr Id) -> MatchGroup Id (LHsExpr Id)
