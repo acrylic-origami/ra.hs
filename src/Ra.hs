@@ -273,6 +273,85 @@ reduce_deep branch args sym =
     ExplicitList _ _ _ -> terminal
     ExplicitPArr _ _ -> terminal
     _ -> fail
+
+
+
+linkIO :: ReduceSyms -> ReduceSyms
+linkIO rs =
+  -- need to make an implicit graph, hopefully there are some higher-level graph creation tools, where I just make a UGraph with the adjacency list I essentially have here
+  let writes = rs_writes rs
+      enum_writes :: Map Pipe Node
+      enum_writes = snd $ foldlWithKey (\(idx, acc) k -> const (idx + 1, insert k idx acc)) (0, M.empty) writes
+      ref_from_get :: Sym -> Maybe Sym
+      ref_from_get sym | (fun, args) <- deapp sym
+                       , HsVar fun_v <- to_expr fun
+                       , (varString $ unLoc fun_v) `elem` read_funs
+                       , length args == 1 = Just $ head args -- TODO this might not be permenant; there may be some exotic base instances that have the ref in a different argument, i.e. not the first. This would need special-casing
+                       | otherwise = Nothing
+      -- depending on if it's a pipe or not, we might or might not resolve it. If we don't resolve it, we want to 
+      write_gr :: Gr (SrcSpan, [Sym]) ()
+      write_gr = 
+        let splits = mapWithKey mapper writes
+            mapper :: Pipe -> [Sym] -> ([Sym], [UEdge])
+            mapper k = foldr (\src ->
+                mappend $ fromMaybe ([src], []) $ fmap (
+                  ([], ) . maybeToList . fmap (enum_writes ! k, , ()) . (enum_writes!?) . getLoc
+                ) $ ref_from_get src
+              ) mempty -- oh man this is nuts.
+        in mkGraph
+            (elems $ mapWithKey (\k v -> (enum_writes ! k, (k, fst v))) splits)
+            (concatMap snd $ elems splits)
+      cond_write_gr = condensation write_gr
+      
+      df_map :: Graph gr => (c -> c -> c) -> (Context a b -> c) -> gr a b -> [Node] -> [(a, c)] -- invariant: acyclic
+      df_map folder mapper g nodes = elems . mapWithKey (uncurry (first (lab' . fromMaybe undefined . fst . `match` g))) . df_map' M.empty nodes where
+        -- df_map' res nodes' = foldr ((fmap ((mapper &&& df_map') . suc')) . fst . `match` g) res nodes' -- the decision is to separate breadth aggregation from depth aggregation, probably going to make depth aggregation separate, but in fact we need to bring out values from the breadth assuming the nodes are deterministic. Therefore the map is only for memoization
+        df_map' = foldl $ \res node ->
+          if node `member` res
+            then res
+            else case fst $ match node g of
+              Just ctx ->
+                let res' = df_map' res (suc' ctx)
+                in foldr reducer (mapper ctx) $ elems $ restrictKeys (S.fromList nodes') res'
+              Nothing -> res
+      
+      sources :: Graph gr => gr a b -> [Context a b]
+      sources = gsel (null . pre')
+      flowed = df_map (++) lab' cond_write_gr (map node' $ sources cond_write_gr)
+  in gfold
+      suc'
+      (\(pre, n, l, suc) agg ->
+        case agg !? n of
+          Just v -> -- it's found in the aggregation; so what? Only if it's empty do we continue with the aggregation, but the problem is that the next nodes are unconstrained. 
+          let next_l = concatMap fst agg ++ concatMap (fst . snd) $ l -- rightmost `snd`: get label from node; leftmost `fst`: get list of symbols from node
+          in (next_l, foldr (pre, n, next_l, suc) & g) -- BOOKMARK this needs to be changed to a fold over the list of graphs from the bottom, which requires a merge over graphs which doesn't exist in fgl :?
+        )
+      ((++) . maybeToList, M.empty)
+      (ufold ((++) . uncurry (<$) . (node' &&& (guard . null . suc'))) [] cond_write_gr)
+      cond_write_gr
+       -- could also do a topo sort and pop the first, but that seems wasteful
+    -- gfold is super tempting, but I don't understand how the values get computed if the depth aggregation definitely always happens first. Instead, I actually really do need a BFS mapping. Clearly in gfold, the leaves are the first to generate `c`-type values. Instead, I need state rolling downwards towards the leaves. On the other hand, `xdfWith` might be the ticket.
+    -- ah wait, i screwed up the order on he graph traversal. gfold should actually do the trick
+  
+  -- nodes in the condensation all share values (which are the snd of these inner node values). Then, they get values from their sources which they are referenced to: do a DFS to add the values into their pool
+-- by iterating through the terminal forms
+-- looking for those methods
+-- collected into a dictionary
+-- based on the location of the variable
+-- obtained by reducing either to a cycle or a constructor
+-- considering somehow trivial wrappings (e.g. `newMVar` if `newEmptyMVar#` is the compiler primitive)
+-- then find the instances that rely on this to create values
+-- somehow by parsing `do`? And finding the write instance of `>>`? Or we're assuming it ignores the previous type, so the only instance of IO will probably be a bunch of IO-"wrapped" things; I guess I never did figure out what to do with assignments because I always assumed I could find the relevant `>>=`
+-- Not like I could interpret `>>=` for `IO` anyways. This is where I have to trace back to `return`, or add an `unsafePerformIO` of kinds.
+-- these are the assumptions then that I'm going to be making, just tracing back to the trivial `return`, assuming that in `return 1 >>= \a -> a`, the function receives `a`. Yes yes, it doesn't actually matter what it gets from a type-theoretic point of view, but trying to analyze the values on the other side we should just hope so. I think that's actually the left-identity law; to be confirmed. <https://wiki.haskell.org/Monad_laws>
+-- could I just identify reads in `reduce_deep`? Or perhaps rather, what about the read-write functions? Suppose one of them was a compiler primitive, rather than just being a collection of reads and writes. That's a bit of a pain, because the semantics of what it's actually doing with the value is very open-ended. 
+-- If I also identified reads, the burden of the top function would just be to reconcile all of the writes and reads and apply those values to the call sites. Recursively, that is (re: nested pipes).
+-- Basically, I expect to get a set of calls out that are dependent on the values at certain positions. If those positions line up with a pipe read, then I grab the corresponding writes, and run reduce_deep, somehow with that context. Probably injecting it into the branch, being careful not to overwrite some of the values. Then reduce_deep will do its thing.
+
+-- get_writes :: Branch -> Stmt Id Id (HsExpr Id) -> Writes
+-- get_writes branch stmt = case stmt of
+  
+    
 -- 
 -- reduce1 :: StackBranch -> Sym -> Maybe (SymTable, [Sym]) -- only return new and updated entries, stop at names and literals... except I guess at a direct application? That dictates whether or not this is the thing that should update the stack table, or if it should just return a flat symbol table. 
 -- reduce1 branch (Sym (_, expr)) = case expr of
