@@ -68,6 +68,8 @@ module Main where
       --   ++ "\n"
       --   ++ (everything (++) ([] `mkQ` ((\expr -> case expr of { (HsVar (L _ v)) -> (showPpr dflags expr ++ " | " ++ (show $ varUnique v)) ++ "\n"; _ -> "" }))) $ concatMap (reduce_deep initial_branch []) ((concat $ shallowest cast (last tl_binds)) :: [HsExpr Id]))
         
+      return $ show $ (\(L _ (AbsBinds{ abs_ev_binds })) -> map (showPpr dflags) abs_ev_binds) (last tl_binds)
+      
       -- return $ show $ map (showPpr dflags) tl_binds
       -- return $ constr_ppr $ typecheckedSource t
       -- return $ constr_ppr $ head $ ((concat $ shallowest cast (last tl_binds)) :: [HsExpr Id])

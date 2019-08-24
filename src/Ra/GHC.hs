@@ -4,11 +4,14 @@ module Ra.GHC (
   grhs_binds,
   bind_to_table,
   mg_drop,
-  mg_flip
+  mg_flip,
+  varString
 ) where
 
 import GHC
+import Var ( varName )
 import Bag
+
 import Data.Generics ( everythingBut, GenericQ, cast, mkQ, extQ )
 import Data.Generics.Extra ( shallowest, constr_ppr )
 import Data.Tuple.Extra ( second, (&&&) )
@@ -57,6 +60,7 @@ grhs_binds branch = everythingBut (<>) (
     `extQ` ((mempty,) . ((\case 
       HsApp _ _ -> True
       HsLam _ -> True
+      HsDo _ _ _ -> True -- TODO dubious case: think further
       _ -> False 
     ) :: HsExpr Id -> Bool)) -- guard against applications and lambdas, which introduce bindings we need to dig into a scope to bind
   )
@@ -71,3 +75,5 @@ mg_rearg f mg = mg {
 mg_drop x = mg_rearg $ drop x -- i don't see why i couldn't do `mg_rearg . drop` but the typechecker complained because the type became rigid
 
 mg_flip = mg_rearg (\(a:b:ns) -> b:a:ns)
+
+varString = occNameString . nameOccName . varName

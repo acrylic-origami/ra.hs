@@ -8,9 +8,10 @@ module Ra.Refs (
       "writeTVar", "modifyTVar", "modifyTVar'", "stateTVar", "swapTVar",
       "writeSTRef", "modifySTRef", "modifySTRef'"
     ]
-  read_funs = [
-      "readIORef", "modifyIORef", "atomicallyModifyIORef", "atomicallyModifyIORef'",
-      "readMVar", "tryReadMVar", "isEmptyMVar", "swapMVar", "modifyMVar", "modifyMVar_", "modifyMVarMasked_", "modifyMVarMasked", "withMVar", "withMVarMasked",
-      "readTVar", "modifyTVar", "modifyTVar'", "stateTVar", "swapTVar",
-      "readSTRef", "modifySTRef", "modifySTRef'"
-    ]
+  read_funs = ["takeMVar", "readMVar", "readIORef", "readTVar", "readSTRef"] -- trust me that these are the base functions for this
+  -- read_funs = [
+  --     "readIORef", "modifyIORef", "atomicallyModifyIORef", "atomicallyModifyIORef'",
+  --     "readMVar", "tryReadMVar", "isEmptyMVar", "swapMVar", "modifyMVar", "modifyMVar_", "modifyMVarMasked_", "modifyMVarMasked", "withMVar", "withMVarMasked",
+  --     "readTVar", "modifyTVar", "modifyTVar'", "stateTVar", "swapTVar",
+  --     "readSTRef", "modifySTRef", "modifySTRef'"
+  --   ]

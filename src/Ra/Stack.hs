@@ -7,7 +7,12 @@ module Ra.Stack (
   union_branches,
   union_sym_tables,
   ReduceSyms(..),
-  PatMatchSyms(..)
+  PatMatchSyms(..),
+  Pipe,
+  is_zeroth_kind,
+  to_expr,
+  mutate_expr,
+  runIO_sym
 ) where
 
 
@@ -38,20 +43,21 @@ import Ra.Extra ( update_head, zipAll )
 
 -- instance ReduceSyms 
 
-type Sym = HsExpr Id
+type Sym = LHsExpr Id
 type SymTable = Map Id [Sym] -- the list is of a symbol table for partial function apps, and the expression.
 union_sym_tables = unionsWith (++)
 -- ah crap, lambdas. these only apply to IIFEs, but still a pain.
 
+type Writes = Map Pipe [Sym]
 type Pipe = SrcSpan -- LHsExpr Id
 data ReduceSyms = ReduceSyms {
   rs_syms :: [Sym],
-  rs_writes :: Map Pipe [Sym]
+  rs_writes :: Writes
 }
 
 data PatMatchSyms = PatMatchSyms {
   pms_syms :: SymTable,
-  pms_writes :: Map Pipe [Sym]
+  pms_writes :: Writes
 }
 
 instance Semigroup ReduceSyms where
@@ -79,6 +85,20 @@ instance Monoid PatMatchSyms where
 -- instance Ord StackFrame where
 --   (Frame{ sf_id = l }) <= (Frame{ sf_id = r }) = l <= r
   
+is_zeroth_kind :: Sym -> Bool
+is_zeroth_kind sym = case unLoc sym of
+  HsLit _ -> True
+  HsOverLit _ -> True
+  ExplicitTuple _ _ -> True
+  ExplicitList _ _ _ -> True
+  _ -> False
+
+to_expr :: Sym -> HsExpr Id
+to_expr = unLoc
+
+mutate_expr :: (HsExpr Id -> HsExpr Id) -> Sym -> Sym
+mutate_expr = fmap -- this just happens to be the Functor definition of GenLocated
+
 -- type StackTable = SetTree StackFrame -- One entry for every level deep and every invokation in a stack frame, so separate invokations of the same function can be distinguished
 type StackBranch = [(SrcSpan, SymTable)] -- nodes: consecutive ones are child-parent
 branch_lookup :: Id -> StackBranch -> Maybe [Sym]
@@ -98,5 +118,9 @@ union_branches =
       folder = ((map (uncurry combine)).) . zipAll
   in foldl1 folder
 
+runIO_name :: Name
+runIO_name = mkSystemName (mkVarOccUnique $ mkFastString "runIO#") (mkVarOcc "runIO#")
+runIO_sym :: Sym
+runIO_sym = mkLocalVar VanillaId runIO_name ty vanillaIdInfo
 -- union_sym_tables :: [SymTable] -> SymTable
 -- union_sym_tables = unionsWith (++) . map coerce -- TODO check if we need to be more sophisticated than this crude merge

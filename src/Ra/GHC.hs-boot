@@ -4,7 +4,8 @@ module Ra.GHC (
   grhs_binds,
   bind_to_table,
   mg_drop,
-  mg_flip
+  mg_flip,
+  var_string
 ) where
 
 import GHC
@@ -18,3 +19,4 @@ grhs_exprs :: GenericQ [HsExpr Id]
 grhs_binds :: StackBranch -> GenericQ PatMatchSyms
 mg_drop :: Int -> MatchGroup Id (LHsExpr Id) -> MatchGroup Id (LHsExpr Id)
 mg_flip :: MatchGroup Id (LHsExpr Id) -> MatchGroup Id (LHsExpr Id)
+varString :: Var -> String

@@ -7,63 +7,67 @@ module Ra (
 import GHC
 import DataCon ( dataConName )
 import Name ( mkSystemName, nameOccName )
-import Var ( varName )
 import OccName ( mkVarOcc, occNameString )
 import Unique ( mkVarOccUnique )
 import ConLike ( ConLike (..) )
 import FastString ( mkFastString ) -- for WildPat synthesis
-import Var ( mkLocalVar, varName ) -- for WildPat synthesis
+import Var ( mkLocalVar ) -- for WildPat synthesis
 import IdInfo ( vanillaIdInfo, IdDetails(VanillaId) ) -- for WildPat synthesis
 
 import Data.Char ( isLower )
-import Data.Tuple.Extra ( second, (***), both )
+import Data.Tuple ( swap )
+import Data.Tuple.Extra ( second, (***), (&&&), both )
 import Data.Function ( (&) )
-import Data.Maybe ( maybeToList, isNothing )
+import Data.Maybe ( fromMaybe, maybeToList, isNothing )
+import Data.Data ( toConstr )
 import Data.Generics.Extra ( constr_ppr )
 import Data.Semigroup ( (<>) )
 import Data.Monoid ( mempty, mconcat )
+import Control.Monad ( guard )
 import Control.Applicative ( (<|>) )
 import Control.Exception ( assert )
 
-import Data.Map.Strict ( unionsWith, unions, unionWith, union, singleton, empty, (!?) )
-import qualified Data.Map.Strict as M ( null )
+import Data.Map.Strict ( Map(..), unionsWith, unions, unionWith, union, singleton, (!?), (!), foldlWithKey, foldrWithKey, keys, elems, insert, mapWithKey)
+import qualified Data.Map.Strict as M ( null, empty )
+import qualified Data.Set as S ( fromList )
 -- import qualified Data.Set as S ( insert )
 
 import qualified Ra.Refs as Refs
 import {-# SOURCE #-} Ra.GHC
 import Ra.Stack
 import Ra.Extra
+import Ra.Refs ( write_funs, read_funs )
 
 -- type NFStackTable = Map Id NF
 -- data NF = WHNF (HsExpr Id) | Ref (HsExpr Id)
 -- WHNF is either a literal, data construction, or unknown function app;
 -- Ref holds the expression that spits out the pipe that holds the value[s] that we must trace in a separate traversal over ref types. Note the Located because we use SrcSpan to find specific write instances
 
-unHsWrap :: HsExpr Id -> HsExpr Id
-unHsWrap expr = case expr of
-  HsWrap _ v -> unHsWrap v
-  _ -> expr
+unHsWrap :: Sym -> Sym
+unHsWrap sym = case to_expr sym of
+  HsWrap _ v -> unHsWrap (const v <$> sym)
+  _ -> sym
 
-deapp :: HsExpr Id -> (HsExpr Id, [HsExpr Id])
-deapp expr =
-  let unwrapped = unHsWrap expr
-  in case unwrapped of
-    HsApp l r -> (id *** (++[unLoc r])) (deapp $ unLoc l)
+deapp :: Sym -> (Sym, [Sym])
+deapp sym =
+  let unwrapped = unHsWrap sym
+  in case to_expr unwrapped of
+    HsApp l r -> (id *** (++[r])) (deapp l)
     _ -> (unwrapped, [])
 
-app :: HsExpr Id -> [HsExpr Id] -> HsExpr Id
-app expr = foldl (curry (uncurry HsApp . both noLoc)) expr
+app :: Sym -> [Sym] -> Sym
+app = foldl ((noLoc.) . HsApp) -- one downside is the noLoc on the app, but all the actual exprs are located
 
 pat_multi_match ::
-  (HsExpr Id -> Maybe [HsExpr Id]) -- predicate and expression expander
+  (Sym -> Maybe [Sym]) -- predicate and expression expander
   -> StackBranch -- full symbol table
   -> [Pat Id]
   -> Sym
   -> PatMatchSyms
-pat_multi_match expand branch pats expr = case expand expr of
+pat_multi_match expand branch pats sym = case expand sym of
   Just args | let arg_matches :: [PatMatchSyms]
                   arg_matches = map (uncurry (pat_match branch)) (zip pats args)
-            , and $ map (not . M.null . pms_syms) arg_matches
+            , and $ map (not . M.null . pms_syms) arg_matches -- TODO this _should_ be fine for matching against nested patterns but just make sure.
             -> mconcat arg_matches -- should be disjoint bindings because the args contribute different variables
   Nothing -> mempty
 
@@ -73,47 +77,48 @@ pat_match ::
   -> Pat Id
   -> Sym
   -> PatMatchSyms -- the new bindings in _this stack frame only_, even if new ones are resolved above and below
--- all new matches from the pat match; empty denotes the match failed (we'll bind wildcards under `_` which will be ignored later since it's an illegal variable and function name)
+-- all new matches from the pat match; M.empty denotes the match failed (we'll bind wildcards under `_` which will be ignored later since it's an illegal variable and function name)
 -- Valid HsExpr: HsApp, OpApp, NegApp, ExplicitTuple, ExplicitList, (SectionL, SectionR) (for data types that are named by operators, e.g. `:`; I might not support this in v1 because it's so thin)
 -- Valid Pat:
-pat_match branch pat expr = case pat of
-  -- empty
+pat_match branch pat sym = case pat of
+  -- M.empty
   WildPat ty ->
     let fake_name = mkSystemName (mkVarOccUnique $ mkFastString "_") (mkVarOcc "_")
         fake_var = mkLocalVar VanillaId fake_name ty vanillaIdInfo
     in mempty {
-        pms_syms = singleton fake_var [expr]
+        pms_syms = singleton fake_var [sym]
       }
   -- wrapper
-  LazyPat (L _ pat) -> pat_match branch pat expr
-  ParPat (L _ pat) -> pat_match branch pat expr
-  BangPat (L _ pat) -> pat_match branch pat expr
-  SigPatOut (L _ pat) _ -> pat_match branch pat expr
+  LazyPat (L _ pat) -> pat_match branch pat sym
+  ParPat (L _ pat) -> pat_match branch pat sym
+  BangPat (L _ pat) -> pat_match branch pat sym
+  SigPatOut (L _ pat) _ -> pat_match branch pat sym
   -- base
   VarPat (L _ v) -> mempty {
-      pms_syms = singleton v [expr]
+      pms_syms = singleton v [sym]
     }
   LitPat _ -> mempty -- no new name bindings
   NPat _ _ _ _ -> mempty
   -- container
-  ListPat pats _ _ -> mconcat $ map (\(L _ pat') -> pat_match branch pat' expr) pats -- encodes the logic that all elements of a list might be part of the pattern regardless of order
-  AsPat (L _ bound) (L _ pat') -> mempty { pms_syms = singleton bound [expr] } <> pat_match branch pat' expr -- NB this should also be disjoint (between the binding and the internal pattern); just guard in case
+  ListPat pats _ _ -> mconcat $ map (\(L _ pat') -> pat_match branch pat' sym) pats -- encodes the logic that all elements of a list might be part of the pattern regardless of order
+  AsPat (L _ bound) (L _ pat') -> mempty { pms_syms = singleton bound [sym] } <> pat_match branch pat' sym -- NB this should also be disjoint (between the binding and the internal pattern); just guard in case
   TuplePat pats _ _ ->
-    let nf_exprs = reduce_deep branch [] expr
-        matcher = \case 
-            ExplicitTuple args _ -> Just (map ((\(Present (L _ expr')) -> expr') . unLoc) args)
+    let nf_syms = reduce_deep branch [] sym
+        matcher sym = case to_expr sym of 
+            ExplicitTuple args _ -> Just (map (fmap (\(Present (L _ expr')) -> expr')) args)
             _ -> Nothing
-    in mconcat $ map (pat_multi_match matcher branch (map unLoc pats)) (rs_syms nf_exprs)
+    in mconcat $ map (pat_multi_match matcher branch (map unLoc pats)) (rs_syms nf_syms)
       
   ConPatOut{ pat_con = L _ (RealDataCon pat_con'), pat_args = d_pat_args } -> case d_pat_args of
     PrefixCon pats ->
-      let matcher x | (HsConLikeOut (RealDataCon con), args) <- deapp x -- x is in NF thanks to pat_multi_match; this assumes it
+      let matcher x | (base_sym, args) <- deapp x -- x is in NF thanks to pat_multi_match; this assumes it
+                    , HsConLikeOut (RealDataCon con) <- to_expr base_sym
                     , dataConName con == dataConName pat_con' = Just args
                     | otherwise = Nothing
-          nf_exprs = reduce_deep branch [] expr
+          nf_exprs = reduce_deep branch [] sym
       in mconcat $ map (pat_multi_match matcher branch (map unLoc pats)) (rs_syms nf_exprs)
     
-    -- case expr of
+    -- case sym of
     --   HsVar id | varName id == dataConName pat_con -> 
     --   HsApp l r -> 
     --     let fst $ iterate (\(l, args) -> case l of
@@ -121,27 +126,25 @@ pat_match branch pat expr = case pat of
     --       HsCase mg ->  -- need to update the symbol table after pattern matching! Normally, it would be great to have that function that spits back the new symbol table and the tree of expressions. Then it should be a separate function that calls patterns matching. I forget why now I wanted to have it all done within pattern match. We already had the idea for this function. It drills all the way through args.
     --       _ -> )
     --   HsCase -> 
-    --   let tied = tie expr
+    --   let tied = tie sym
     --   in unions $ map (deapp . bool () (tie (table))) (snd tied)
     RecCon _ -> error "Record syntax yet to be implemented"
   _ -> error $ constr_ppr pat
 
 reduce_deep :: StackBranch -> [[Sym]] -> Sym -> ReduceSyms
 -- TODO this error bank is getting pretty ugly on account of Sym and the repeated arguments of application. Consider refactor.
-reduce_deep _ args@(_:_) (HsConLikeOut _) = error "Only bare ConLike should make it to `reduce_deep`" -- $ (map constr_ppr args) ++ 
-reduce_deep _ (_:_) (HsOverLit _) = error "Application on OverLit"
-reduce_deep _ (_:_) (HsLit _) = error "Application on Lit"
-reduce_deep _ (_:_) (ExplicitTuple _ _) = error "Application on ExplicitTuple"
+reduce_deep _ args@(_:_) (L _ (HsConLikeOut _)) = error "Only bare ConLike should make it to `reduce_deep`" -- $ (map constr_ppr args) ++ 
+reduce_deep _ (_:_) sym | is_zeroth_kind sym = error "Application on " ++ (show $ toConstr $ to_expr sym)
 
-reduce_deep branch args expr =
+reduce_deep branch args sym =
   let terminal =
         -- assert (isNothing m_parts) $
-        (((flip ReduceSyms mempty . pure) *** ((++args) . map pure)) $ deapp expr) -- add all arguments to the manual arguments in `reduce_deep`'s... uhh, arguments.
+        (((flip ReduceSyms mempty . pure) *** ((++args) . map pure)) $ deapp sym) -- add all arguments to the manual arguments in `reduce_deep`'s... uhh, arguments.
         & (uncurry $
             foldl (\ress args' ->
                 let nf_args' = mconcat $ map (reduce_deep branch []) args'
                 in ReduceSyms {
-                    rs_syms = [ HsApp (noLoc res) (noLoc arg) | res <- rs_syms ress, arg <- rs_syms nf_args' ],
+                    rs_syms = [ noLoc $ HsApp res arg | res <- rs_syms ress, arg <- rs_syms nf_args' ], -- same issue: noLoc on the apps but all exprs are loc'd
                     rs_writes = unionWith (++) (rs_writes ress) (rs_writes nf_args')
                   }
               )
@@ -149,14 +152,14 @@ reduce_deep branch args expr =
       unravel1 = reduce_deep branch args
       unravel :: [HsExpr Id] -> ReduceSyms
       unravel = mconcat . map (reduce_deep branch args)
-      fail = error $ constr_ppr expr
+      fail = error $ constr_ppr sym
       -- . uncurry zip . ( -- over all new expressions from reduce1
       --     repeat . (flip update_head branch) . second . (union_sym_tables.) . flip (:) . pure -- make many copies of the branch unioned with the new binds from reduce1
       --     *** id -- BOOKMARK: fix this error
       --   ) -- what happens when reduce1 is identity? Then it's thrown into reduce_deep again which matches against this. It's a similar story with `iterate`, but I think when it converges to a fixed point, somehow it stops?
         -- no, we need to be explicit because GHC isn't going to detect all cycles, even if we're applying a function over and over again to the same argument.
         -- not true, GHC can detect the cycle when the thunk is reforced. I need it to be the same thunk. The problem is that `reduce_deep` and `reduce1` interact.
-  in case expr of
+  in case sym of
     HsLamCase mg -> reduce_deep branch args (HsLam mg)
     
     HsLam mg | let loc = getLoc $ mg_alts mg -- <- NB this is why the locations of MatchGroups don't matter
@@ -186,12 +189,26 @@ reduce_deep branch args expr =
           -- flatten = foldr (uncurry (***) . (((union_branches.) . flip (:) . pure) *** (++))) ([], []) -- not going to lie, the point-free here is a bit ridiculous
       in mconcat $ map (reduce_deep branch args) left_exprs -- TODO The whole StackBranch structure is a little screwy, because all of them should eventually lead to lambdas except for unresolvable bindings. Therefore, 
       -- in foldr ((++) . flip (reduce_deep branch) args) [] nf_left
-    HsVar _ -> terminal
+      
+    HsVar (L _ v) -> case varString v of
+      -- "newEmptyMVar" -> -- return as terminal and identify above
+      -- "newMVar" -> -- find this in post-processing and do it
+      -- "takeMVar" -> if length args >= 1 -- no need, do this in post-processing
+      --   then 
+      --   else terminal
+      "putMVar" -> if length args >= 2
+        then
+          let (pipes:vals:_) = args
+          in ReduceSyms {
+                rs_syms = terminal,
+                rs_writes = unionsWith (++) [singleton pipe arg | pipe <- pipes, arg <- args]
+              }
+        else terminal
       
     HsApp _ _ ->
-      let (fun, next_args) = deapp expr
+      let (fun, next_args) = deapp sym
           passthrough = reduce_deep branch (map pure next_args ++ args) fun
-      in case unHsWrap fun of
+      in case to_expr $ unHsWrap fun of
         HsConLikeOut _ -> terminal
         _ -> passthrough
       
@@ -202,8 +219,8 @@ reduce_deep branch args expr =
     NegApp (L _ v) _ -> unravel1 v
     HsPar (L _ v) -> unravel1 v
     SectionL (L _ v) (L _ op) -> reduce_deep branch ([v] : args) op
-    SectionR (L _ m_op) (L _ v) ->
-      let (HsVar (L _ op)) = unHsWrap m_op
+    SectionR m_op (L _ v) ->
+      let (HsVar (L _ op)) = to_expr $ unHsWrap m_op
       in case branch_lookup op branch of
         Just branch_exprs -> branch_exprs & foldr (\(HsLam mg) -> (<>(reduce_deep branch ([v] : args) (HsLam (mg_flip mg))))) mempty -- BOOMARK: also do the operator constructor case
         Nothing -> terminal
@@ -230,6 +247,22 @@ reduce_deep branch args expr =
       --   mg_origin = Generated
       -- }))) -- also refactor so we can just use that pat match code
     HsLet _ (L _ expr) -> unravel1 expr -- assume local bindings already caught by surrounding function body (HsLam case)
+    HsDo _ (L _ stmts) _ -> stmts & foldl (\syms stmt -> case stmt of
+        LastStmt expr _ _ -> syms { rs_syms = mempty } <> mempty { rs_syms = unravel1 expr & map (\expr' ->
+            let (m_fun, args) = deapp expr'
+                fun = to_expr m_fun
+            in if varString fun == "return"
+                  && length args > 0 -- ensure that it's saturated to avoid pathological case of `return return`, i.e. `IO (a -> IO a)`
+              then head args -- `return` is unambiguously unfolded into the constituent -- BOOKMARK this isn't the place to do this analysis: unpack in the HsApp case, or in the post-processing. This does need to happen -- it's the only way that we can interpret the values going from other monads or pure land into IO, and also accompanied with the IORef cases.
+              else HsApp runIO_var (unravel1 arg1)
+          ) } -- kill the results from all previous stmts because of the semantics of `>>`
+        -- ApplicativeStmt _ _ _ -> undefined -- TODO yet to appear in the wild and be implemented
+        BindStmt pat expr _ _ ty ->  -- covered by binds; can't be the last statement anyways -- <- scratch that -- TODO implement this to unbox the monad (requires fake IO structure2)
+        BodyStmt expr _ _ _ -> unravel1 expr
+        ParStmt -> undefined -- not analyzed for now, because the list comp is too niche (only used for parallel monad comprehensions; see <https://gitlab.haskell.org/ghc/ghc/wikis/monad-comprehensions>)
+        -- fun fact: I thought ParStmt was for "parenthesized", but it's "parallel"
+      ) [] -- shove all the work to another round of `reduce_deep`.
+    
     -- Terminal forms
   
     HsConLikeOut _ -> terminal

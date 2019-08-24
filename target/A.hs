@@ -8,6 +8,4 @@ foo _ = bar 3 where
     4 | (c, d) <- (\x -> x + 6, (+5))
       , let e = 42 -> if 8 > 7 then D (c 9) e else (\x -> D (d 10) x) e
 
-quux = D 3 4
-
 baz = foo 2
