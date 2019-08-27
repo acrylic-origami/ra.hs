@@ -1,10 +1,10 @@
-{-# LANGUAGE TupleSections #-}
-module Ra.Stack (
+{-# LANGUAGE TupleSections, DerivingFunctor #-}
+module Ra.Lang (
   Sym(..),
   SymTable(..),
   StackBranch,
-  branch_lookup,
-  union_branches,
+  Stack(..),
+  stack_var_lookup,
   union_sym_tables,
   ReduceSyms(..),
   PatMatchSyms(..),
@@ -60,6 +60,31 @@ data PatMatchSyms = PatMatchSyms {
   pms_writes :: Writes
 }
 
+-- type StackTable = SetTree StackFrame -- One entry for every level deep and every invokation in a stack frame, so separate invokations of the same function can be distinguished
+newtype StackBranch = SB [(SrcSpan, SymTable)] deriving Functor -- nodes: consecutive ones are child-parent
+data Stack = Stack {
+  st_branch :: StackBranch,
+  st_threads :: [Int]
+}
+
+instance Semigroup StackBranch where
+  (<>) =
+    let combine (Just (a_src, a_table)) (Just b@(b_src, b_table)) = assert (a_src == b_src) (second (union_sym_tables . (:[a_table])) b) -- prefer first (accumulating) branch
+        combine Nothing (Just b) = b
+        combine (Just a) Nothing = a
+    in ((map (uncurry combine)).) . zipAll
+
+instance Monoid StackBranch where
+  mempty = SB mempty
+  mappend = (<>)
+
+instance Semigroup Stack where
+  (Stack b_l t_l) <> (Stack b_r t_r) = Stack (b_l <> b_r) (t_l <> t_r)
+
+instance Monoid Stack where
+  mempty = Stack mempty mempty
+  mappend = (<>)
+
 instance Semigroup ReduceSyms where
   (ReduceSyms lsyms lwrites) <> (ReduceSyms rsyms rwrites) = ReduceSyms (lsyms <> rsyms) (unionWith (++) lwrites rwrites) -- is there a nicer way to do this?
   
@@ -99,24 +124,23 @@ to_expr = unLoc
 mutate_expr :: (HsExpr Id -> HsExpr Id) -> Sym -> Sym
 mutate_expr = fmap -- this just happens to be the Functor definition of GenLocated
 
--- type StackTable = SetTree StackFrame -- One entry for every level deep and every invokation in a stack frame, so separate invokations of the same function can be distinguished
-type StackBranch = [(SrcSpan, SymTable)] -- nodes: consecutive ones are child-parent
-branch_lookup :: Id -> StackBranch -> Maybe [Sym]
-branch_lookup v = foldr ((\t -> (<|>(t !? v))) . snd) Nothing  -- for some reason, `coerce` doesn't want to work here from some ambiguity that I can't understand
+stack_var_lookup :: Id -> Stack -> Maybe [Sym]
+stack_var_lookup v = branch_var_lookup v . st_branch
+
+branch_var_lookup :: Id -> StackBranch -> Maybe [Sym]
+branch_var_lookup v = foldr ((\t -> (<|>(t !? v))) . snd . coerce) Nothing  -- for some reason, `coerce` doesn't want to work here from some ambiguity that I can't understand
+
+has_visited :: SrcLoc -> Stack -> Bool
+has_visited = (flip elem) . map fst . st_branch
+
 clear_branch :: StackBranch -> StackBranch
-clear_branch = map (second (const empty))
+clear_branch = fmap $ map (second (const empty)) . coerce
+
 update_head_table :: SymTable -> StackBranch -> StackBranch
-update_head_table next_table = update_head (second (union_sym_tables . (:[next_table])))
--- consider making Alternative so the merge operation is more idiomatically `<|>`
+update_head_table next_table = fmap $ update_head (second ((<>) . (:[next_table])))
 
 union_branches :: [StackBranch] -> StackBranch
-union_branches = 
-  let combine (Just (a_src, a_table)) (Just b@(b_src, b_table)) = assert (a_src == b_src) (second (union_sym_tables . (:[a_table])) b) -- prefer first (accumulating) branch
-      combine Nothing (Just b) = b
-      combine (Just a) Nothing = a
-      folder :: StackBranch -> StackBranch -> StackBranch
-      folder = ((map (uncurry combine)).) . zipAll
-  in foldl1 folder
+union_branches = mconcat
 
 runIO_name :: Name
 runIO_name = mkSystemName (mkVarOccUnique $ mkFastString "runIO#") (mkVarOcc "runIO#")

@@ -34,7 +34,7 @@ import qualified Data.Set as S ( fromList )
 
 import qualified Ra.Refs as Refs
 import {-# SOURCE #-} Ra.GHC
-import Ra.Stack
+import Ra.Lang
 import Ra.Extra
 import Ra.Refs ( write_funs, read_funs )
 
@@ -64,9 +64,9 @@ pat_multi_match ::
   -> [Pat Id]
   -> Sym
   -> PatMatchSyms
-pat_multi_match expand branch pats sym = case expand sym of
+pat_multi_match expand stack pats sym = case expand sym of
   Just args | let arg_matches :: [PatMatchSyms]
-                  arg_matches = map (uncurry (pat_match branch)) (zip pats args)
+                  arg_matches = map (uncurry (pat_match stack)) (zip pats args)
             , and $ map (not . M.null . pms_syms) arg_matches -- TODO this _should_ be fine for matching against nested patterns but just make sure.
             -> mconcat arg_matches -- should be disjoint bindings because the args contribute different variables
   Nothing -> mempty
@@ -80,7 +80,7 @@ pat_match ::
 -- all new matches from the pat match; M.empty denotes the match failed (we'll bind wildcards under `_` which will be ignored later since it's an illegal variable and function name)
 -- Valid HsExpr: HsApp, OpApp, NegApp, ExplicitTuple, ExplicitList, (SectionL, SectionR) (for data types that are named by operators, e.g. `:`; I might not support this in v1 because it's so thin)
 -- Valid Pat:
-pat_match branch pat sym = case pat of
+pat_match stack pat sym = case pat of
   -- M.empty
   WildPat ty ->
     let fake_name = mkSystemName (mkVarOccUnique $ mkFastString "_") (mkVarOcc "_")
@@ -89,10 +89,10 @@ pat_match branch pat sym = case pat of
         pms_syms = singleton fake_var [sym]
       }
   -- wrapper
-  LazyPat (L _ pat) -> pat_match branch pat sym
-  ParPat (L _ pat) -> pat_match branch pat sym
-  BangPat (L _ pat) -> pat_match branch pat sym
-  SigPatOut (L _ pat) _ -> pat_match branch pat sym
+  LazyPat (L _ pat) -> pat_match stack pat sym
+  ParPat (L _ pat) -> pat_match stack pat sym
+  BangPat (L _ pat) -> pat_match stack pat sym
+  SigPatOut (L _ pat) _ -> pat_match stack pat sym
   -- base
   VarPat (L _ v) -> mempty {
       pms_syms = singleton v [sym]
@@ -100,14 +100,14 @@ pat_match branch pat sym = case pat of
   LitPat _ -> mempty -- no new name bindings
   NPat _ _ _ _ -> mempty
   -- container
-  ListPat pats _ _ -> mconcat $ map (\(L _ pat') -> pat_match branch pat' sym) pats -- encodes the logic that all elements of a list might be part of the pattern regardless of order
-  AsPat (L _ bound) (L _ pat') -> mempty { pms_syms = singleton bound [sym] } <> pat_match branch pat' sym -- NB this should also be disjoint (between the binding and the internal pattern); just guard in case
+  ListPat pats _ _ -> mconcat $ map (\(L _ pat') -> pat_match stack pat' sym) pats -- encodes the logic that all elements of a list might be part of the pattern regardless of order
+  AsPat (L _ bound) (L _ pat') -> mempty { pms_syms = singleton bound [sym] } <> pat_match stack pat' sym -- NB this should also be disjoint (between the binding and the internal pattern); just guard in case
   TuplePat pats _ _ ->
-    let nf_syms = reduce_deep branch [] sym
+    let nf_syms = reduce_deep stack [] sym
         matcher sym = case to_expr sym of 
             ExplicitTuple args _ -> Just (map (fmap (\(Present (L _ expr')) -> expr')) args)
             _ -> Nothing
-    in mconcat $ map (pat_multi_match matcher branch (map unLoc pats)) (rs_syms nf_syms)
+    in mconcat $ map (pat_multi_match matcher stack (map unLoc pats)) (rs_syms nf_syms)
       
   ConPatOut{ pat_con = L _ (RealDataCon pat_con'), pat_args = d_pat_args } -> case d_pat_args of
     PrefixCon pats ->
@@ -115,8 +115,8 @@ pat_match branch pat sym = case pat of
                     , HsConLikeOut (RealDataCon con) <- to_expr base_sym
                     , dataConName con == dataConName pat_con' = Just args
                     | otherwise = Nothing
-          nf_exprs = reduce_deep branch [] sym
-      in mconcat $ map (pat_multi_match matcher branch (map unLoc pats)) (rs_syms nf_exprs)
+          nf_exprs = reduce_deep stack [] sym
+      in mconcat $ map (pat_multi_match matcher stack (map unLoc pats)) (rs_syms nf_exprs)
     
     -- case sym of
     --   HsVar id | varName id == dataConName pat_con -> 
@@ -131,39 +131,40 @@ pat_match branch pat sym = case pat of
     RecCon _ -> error "Record syntax yet to be implemented"
   _ -> error $ constr_ppr pat
 
-reduce_deep :: StackBranch -> [[Sym]] -> Sym -> ReduceSyms
--- TODO this error bank is getting pretty ugly on account of Sym and the repeated arguments of application. Consider refactor.
+reduce_deep :: Stack -> [[Sym]] -> Sym -> ReduceSyms
 reduce_deep _ args@(_:_) (L _ (HsConLikeOut _)) = error "Only bare ConLike should make it to `reduce_deep`" -- $ (map constr_ppr args) ++ 
 reduce_deep _ (_:_) sym | is_zeroth_kind sym = error "Application on " ++ (show $ toConstr $ to_expr sym)
 
-reduce_deep branch args sym =
+reduce_deep stack args sym =
   let terminal =
         -- assert (isNothing m_parts) $
         (((flip ReduceSyms mempty . pure) *** ((++args) . map pure)) $ deapp sym) -- add all arguments to the manual arguments in `reduce_deep`'s... uhh, arguments.
         & (uncurry $
             foldl (\ress args' ->
-                let nf_args' = mconcat $ map (reduce_deep branch []) args'
+                let nf_args' = mconcat $ map (reduce_deep stack []) args'
                 in ReduceSyms {
                     rs_syms = [ noLoc $ HsApp res arg | res <- rs_syms ress, arg <- rs_syms nf_args' ], -- same issue: noLoc on the apps but all exprs are loc'd
                     rs_writes = unionWith (++) (rs_writes ress) (rs_writes nf_args')
                   }
               )
           ) -- TODO fishy information loss here on the Sym -> expr conversion; we may need to keep the bindings from any partials, even if it's terminal. This might be temporary anyways
-      unravel1 = reduce_deep branch args
-      unravel :: [HsExpr Id] -> ReduceSyms
-      unravel = mconcat . map (reduce_deep branch args)
+      unravel1 :: Sym -> ReduceSyms
+      unravel1 = reduce_deep stack args
+      
+      unravel :: [Sym] -> ReduceSyms
+      unravel = mconcat . map (reduce_deep stack args)
       fail = error $ constr_ppr sym
       -- . uncurry zip . ( -- over all new expressions from reduce1
-      --     repeat . (flip update_head branch) . second . (union_sym_tables.) . flip (:) . pure -- make many copies of the branch unioned with the new binds from reduce1
+      --     repeat . (flip update_head stack) . second . (union_sym_tables.) . flip (:) . pure -- make many copies of the stack unioned with the new binds from reduce1
       --     *** id -- BOOKMARK: fix this error
       --   ) -- what happens when reduce1 is identity? Then it's thrown into reduce_deep again which matches against this. It's a similar story with `iterate`, but I think when it converges to a fixed point, somehow it stops?
         -- no, we need to be explicit because GHC isn't going to detect all cycles, even if we're applying a function over and over again to the same argument.
         -- not true, GHC can detect the cycle when the thunk is reforced. I need it to be the same thunk. The problem is that `reduce_deep` and `reduce1` interact.
   in case sym of
-    HsLamCase mg -> reduce_deep branch args (HsLam mg)
+    HsLamCase mg -> reduce_deep stack args (HsLam mg)
     
     HsLam mg | let loc = getLoc $ mg_alts mg -- <- NB this is why the locations of MatchGroups don't matter
-             , not $ loc `elem` map fst branch -> -- beware about `noLoc`s showing up here: maybe instead break out the pattern matching code
+             , not $  -> -- beware about `noLoc`s showing up here: maybe instead break out the pattern matching code
       if matchGroupArity mg > length args
         then terminal
         else
@@ -171,68 +172,80 @@ reduce_deep branch args sym =
                 (unLoc $ mg_alts mg) & mconcat . mconcat . map ( -- over function body alternatives
                   map ( -- over arguments
                     mconcat . map ( -- over possible expressions
-                      uncurry (flip (pat_match branch)) -- share the same branch
+                      uncurry (flip (pat_match stack)) -- share the same stack
                     ) . (uncurry zip) . (id *** repeat)
                   ) . zip args . map unLoc . m_pats . unLoc -- `args` FINALLY USED HERE
                 )
               
-              PatMatchSyms next_explicit_binds bind_writes = grhs_binds branch mg
+              PatMatchSyms next_explicit_binds bind_writes = grhs_binds stack mg
               next_exprs = grhs_exprs $ map (grhssGRHSs . m_grhss . unLoc) $ unLoc $ mg_alts mg
               next_frame = (loc, union_sym_tables [pms_syms pat_matches, next_explicit_binds])
-              next_branch = next_frame : branch
+              next_stack = stack {
+                  st_branch = (fmap next_frame:) $ st_branch stack
+                }
               next_args = drop (matchGroupArity mg) args
-          in mempty { rs_writes = bind_writes } <> mempty { rs_writes = pms_writes pat_matches } <> (mconcat $ map (reduce_deep next_branch next_args) next_exprs)
+          in mempty { rs_writes = bind_writes <> pms_writes pat_matches } <> (mconcat $ map (reduce_deep next_stack next_args) next_exprs)
           
-    HsVar (L _ v) | Just left_exprs <- branch_lookup v branch ->
-      let flatten :: [(StackBranch, [a])] -> (StackBranch, [a])
-          flatten = foldr (\(a, b) (a', b') -> (union_branches [a, a'], b ++ b')) ([], []) -- sometimes pointfree isn't worth it
-          -- flatten = foldr (uncurry (***) . (((union_branches.) . flip (:) . pure) *** (++))) ([], []) -- not going to lie, the point-free here is a bit ridiculous
-      in mconcat $ map (reduce_deep branch args) left_exprs -- TODO The whole StackBranch structure is a little screwy, because all of them should eventually lead to lambdas except for unresolvable bindings. Therefore, 
-      -- in foldr ((++) . flip (reduce_deep branch) args) [] nf_left
+    HsVar (L _ v) | Just left_exprs <- stack_var_lookup v stack ->
+      mconcat $ map (reduce_deep stack args) left_exprs -- TODO The whole StackBranch structure is a little screwy, because all of them should eventually lead to lambdas except for unresolvable bindings. Therefore, 
+      -- in foldr ((++) . flip (reduce_deep stack) args) [] nf_left
       
-    HsVar (L _ v) -> case varString v of
+    HsVar (L loc v) -> case varString v of
       -- "newEmptyMVar" -> -- return as terminal and identify above
       -- "newMVar" -> -- find this in post-processing and do it
       -- "takeMVar" -> if length args >= 1 -- no need, do this in post-processing
       --   then 
       --   else terminal
+      "forkIO" -> if length args >= 1 -- shouldn't ever be more than one really, but don't err if there might be a good reason
+        then
+          let (to_fork:rest) = args
+              next_stack = stack {
+                  st_threads = length $ st_branch stack
+                  st_branch = fmap ((loc, M.empty):) $ st_branch stack
+                }
+              result = reduce_deep next_stack rest to_fork
+          in result {
+              rs_syms = [error "Using the ThreadID from forkIO is not yet supported."]
+            }
+        else terminal
       "putMVar" -> if length args >= 2
         then
           let (pipes:vals:_) = args
           in ReduceSyms {
-                rs_syms = terminal,
-                rs_writes = unionsWith (++) [singleton pipe arg | pipe <- pipes, arg <- args]
-              }
+              rs_syms = terminal,
+              rs_writes = unionsWith (++) [singleton pipe arg | pipe <- pipes, arg <- args]
+            }
         else terminal
+      _ -> terminal
       
     HsApp _ _ ->
       let (fun, next_args) = deapp sym
-          passthrough = reduce_deep branch (map pure next_args ++ args) fun
+          passthrough = reduce_deep stack (map pure next_args ++ args) fun
       in case to_expr $ unHsWrap fun of
         HsConLikeOut _ -> terminal
         _ -> passthrough
       
-    OpApp (L _ l) (L _ op) _ (L _ r) -> reduce_deep branch ([l]:[r]:args) op
+    OpApp l_l l_op _ l_r -> reduce_deep stack ([l_l]:[l_r]:args) l_op
     
     -- Wrappings
     HsWrap _ v -> unravel1 v
     NegApp (L _ v) _ -> unravel1 v
     HsPar (L _ v) -> unravel1 v
-    SectionL (L _ v) (L _ op) -> reduce_deep branch ([v] : args) op
+    SectionL (L _ v) (L _ op) -> reduce_deep stack ([v] : args) op
     SectionR m_op (L _ v) ->
       let (HsVar (L _ op)) = to_expr $ unHsWrap m_op
-      in case branch_lookup op branch of
-        Just branch_exprs -> branch_exprs & foldr (\(HsLam mg) -> (<>(reduce_deep branch ([v] : args) (HsLam (mg_flip mg))))) mempty -- BOOMARK: also do the operator constructor case
+      in case stack_var_lookup op stack of
+        Just branch_exprs -> branch_exprs & foldr (<>(reduce_deep stack ([v] : args) . fmap (\(HsLam mg) -> HsLam (mg_flip mg)))) mempty -- BOOMARK: also do the operator constructor case
         Nothing -> terminal
     -- Take the mapping from the function, reduce_deep'd to HsLam, then pat-match against all arguments
     -- Or, rearrange to an application of `flip` on the app, then the section. This feels way nicer, but the user is just not allowed to rename `flip`, which is unreasonable.
-    HsCase l_x@(L _ x) mg -> reduce_deep branch args (HsApp (L (getLoc $ mg_alts mg) (HsLam mg)) l_x) -- refactor as HsLam so we can just use that pat match code
+    HsCase l_x@(L _ x) mg -> unravel1 (noLoc $ HsApp (L (getLoc $ mg_alts mg) (HsLam mg)) l_x) -- refactor as HsLam so we can just use that pat match code
     HsIf _ (L _ if_) (L _ then_) (L _ else_) -> unravel [then_, else_]
     HsMultiIf ty rhss ->
-      let PatMatchSyms next_explicit_binds bind_writes = grhs_binds branch rhss
+      let PatMatchSyms next_explicit_binds bind_writes = grhs_binds stack rhss
           next_exprs = grhs_exprs rhss
           next_frame = (noSrcSpan, next_explicit_binds)
-      in mempty { rs_writes = bind_writes } <> (mconcat $ map (reduce_deep (next_frame : branch) args) next_exprs)
+      in mempty { rs_writes = bind_writes } <> (mconcat $ map (reduce_deep (next_frame : stack) args) next_exprs)
       -- (HsLam (MatchGroup {
       --   mg_alts = noLoc $ map (noLoc Match {
       --       m_ctxt = error "Accessed m_ctxt of contrived Match",
@@ -280,6 +293,10 @@ linkIO :: ReduceSyms -> ReduceSyms
 linkIO rs =
   -- need to make an implicit graph, hopefully there are some higher-level graph creation tools, where I just make a UGraph with the adjacency list I essentially have here
   let writes = rs_writes rs
+      
+      reduce_IO :: SymTable -> 
+    
+  
       enum_writes :: Map Pipe Node
       enum_writes = snd $ foldlWithKey (\(idx, acc) k -> const (idx + 1, insert k idx acc)) (0, M.empty) writes
       ref_from_get :: Sym -> Maybe Sym
@@ -346,15 +363,15 @@ linkIO rs =
 -- these are the assumptions then that I'm going to be making, just tracing back to the trivial `return`, assuming that in `return 1 >>= \a -> a`, the function receives `a`. Yes yes, it doesn't actually matter what it gets from a type-theoretic point of view, but trying to analyze the values on the other side we should just hope so. I think that's actually the left-identity law; to be confirmed. <https://wiki.haskell.org/Monad_laws>
 -- could I just identify reads in `reduce_deep`? Or perhaps rather, what about the read-write functions? Suppose one of them was a compiler primitive, rather than just being a collection of reads and writes. That's a bit of a pain, because the semantics of what it's actually doing with the value is very open-ended. 
 -- If I also identified reads, the burden of the top function would just be to reconcile all of the writes and reads and apply those values to the call sites. Recursively, that is (re: nested pipes).
--- Basically, I expect to get a set of calls out that are dependent on the values at certain positions. If those positions line up with a pipe read, then I grab the corresponding writes, and run reduce_deep, somehow with that context. Probably injecting it into the branch, being careful not to overwrite some of the values. Then reduce_deep will do its thing.
+-- Basically, I expect to get a set of calls out that are dependent on the values at certain positions. If those positions line up with a pipe read, then I grab the corresponding writes, and run reduce_deep, somehow with that context. Probably injecting it into the stack, being careful not to overwrite some of the values. Then reduce_deep will do its thing.
 
 -- get_writes :: Branch -> Stmt Id Id (HsExpr Id) -> Writes
--- get_writes branch stmt = case stmt of
+-- get_writes stack stmt = case stmt of
   
     
 -- 
 -- reduce1 :: StackBranch -> Sym -> Maybe (SymTable, [Sym]) -- only return new and updated entries, stop at names and literals... except I guess at a direct application? That dictates whether or not this is the thing that should update the stack table, or if it should just return a flat symbol table. 
--- reduce1 branch (Sym (_, expr)) = case expr of
+-- reduce1 stack (Sym (_, expr)) = case expr of
   
   
   -- ignore HsVar and HsApp, which should be fulfilled by the calling scope
