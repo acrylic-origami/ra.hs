@@ -48,7 +48,8 @@ type SymTable = Map Id [Sym] -- the list is of a symbol table for partial functi
 union_sym_tables = unionsWith (++)
 -- ah crap, lambdas. these only apply to IIFEs, but still a pain.
 
-type Writes = Map Pipe [Sym]
+type ThreadKey = [SrcSpan]
+type Writes = Map Pipe [(ThreadKey, Sym)]
 type Pipe = SrcSpan -- LHsExpr Id
 data ReduceSyms = ReduceSyms {
   rs_syms :: [Sym],
@@ -124,14 +125,20 @@ to_expr = unLoc
 mutate_expr :: (HsExpr Id -> HsExpr Id) -> Sym -> Sym
 mutate_expr = fmap -- this just happens to be the Functor definition of GenLocated
 
+make_thread_key :: Stack -> ThreadKey
+make_thread_key stack =
+  if not $ null $ st_thread stack
+    then drop ((length $ st_branch stack) - (head $ st_thread stack)) $ map fst $ st_branch stack
+    else mempty
+
 stack_var_lookup :: Id -> Stack -> Maybe [Sym]
 stack_var_lookup v = branch_var_lookup v . st_branch
 
 branch_var_lookup :: Id -> StackBranch -> Maybe [Sym]
 branch_var_lookup v = foldr ((\t -> (<|>(t !? v))) . snd . coerce) Nothing  -- for some reason, `coerce` doesn't want to work here from some ambiguity that I can't understand
 
-has_visited :: SrcLoc -> Stack -> Bool
-has_visited = (flip elem) . map fst . st_branch
+is_visited :: SrcLoc -> Stack -> Bool
+is_visited = (flip elem) . map fst . st_branch
 
 clear_branch :: StackBranch -> StackBranch
 clear_branch = fmap $ map (second (const empty)) . coerce

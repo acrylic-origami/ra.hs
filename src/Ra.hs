@@ -6,6 +6,7 @@ module Ra (
 
 import GHC
 import DataCon ( dataConName )
+import Type ( tyConAppTyConPicky_maybe )
 import Name ( mkSystemName, nameOccName )
 import OccName ( mkVarOcc, occNameString )
 import Unique ( mkVarOccUnique )
@@ -164,7 +165,7 @@ reduce_deep stack args sym =
     HsLamCase mg -> reduce_deep stack args (HsLam mg)
     
     HsLam mg | let loc = getLoc $ mg_alts mg -- <- NB this is why the locations of MatchGroups don't matter
-             , not $  -> -- beware about `noLoc`s showing up here: maybe instead break out the pattern matching code
+             , not $ is_visited loc stack -> -- beware about `noLoc`s showing up here: maybe instead break out the pattern matching code
       if matchGroupArity mg > length args
         then terminal
         else
@@ -181,7 +182,7 @@ reduce_deep stack args sym =
               next_exprs = grhs_exprs $ map (grhssGRHSs . m_grhss . unLoc) $ unLoc $ mg_alts mg
               next_frame = (loc, union_sym_tables [pms_syms pat_matches, next_explicit_binds])
               next_stack = stack {
-                  st_branch = (fmap next_frame:) $ st_branch stack
+                  st_branch = (fmap (next_frame:)) $ st_branch stack
                 }
               next_args = drop (matchGroupArity mg) args
           in mempty { rs_writes = bind_writes <> pms_writes pat_matches } <> (mconcat $ map (reduce_deep next_stack next_args) next_exprs)
@@ -196,10 +197,19 @@ reduce_deep stack args sym =
       -- "takeMVar" -> if length args >= 1 -- no need, do this in post-processing
       --   then 
       --   else terminal
-      "forkIO" -> if length args >= 1 -- shouldn't ever be more than one really, but don't err if there might be a good reason
-        then
-          let (to_fork:rest) = args
-              next_stack = stack {
+      
+      -- MAGIC MONADS (fallthrough)
+      ">>" | i:o:_ <- args
+           , i' = unravel1 i
+           , o' = unravel1 o -> -- magical monad `*>` == `>>`: take right-hand syms, merge writes
+            i' { rs_syms = mempty } <> o'
+      ">>=" | i:o:args' <- args -> -- magical monad `>>=`: shove the return value from the last stage into the next, merge writes
+            -- grabbing the writes is as easy as just adding `i` to the arguments; the argument resolution in `terminal` will take care of it
+            -- under the assumption that it's valid to assume IO is a pure wrapper, this actually just reduces to plain application of a lambda
+              reduce_deep stack i:args' o
+        
+      "forkIO" | to_fork:rest <- args -> 
+          let next_stack = stack {
                   st_threads = length $ st_branch stack
                   st_branch = fmap ((loc, M.empty):) $ st_branch stack
                 }
@@ -207,13 +217,12 @@ reduce_deep stack args sym =
           in result {
               rs_syms = [error "Using the ThreadID from forkIO is not yet supported."]
             }
-        else terminal
       "putMVar" -> if length args >= 2
         then
           let (pipes:vals:_) = args
           in ReduceSyms {
               rs_syms = terminal,
-              rs_writes = unionsWith (++) [singleton pipe arg | pipe <- pipes, arg <- args]
+              rs_writes = unionsWith (++) [singleton pipe (make_thread_key stack, arg) | pipe <- pipes, arg <- args]
             }
         else terminal
       _ -> terminal
@@ -261,14 +270,18 @@ reduce_deep stack args sym =
       -- }))) -- also refactor so we can just use that pat match code
     HsLet _ (L _ expr) -> unravel1 expr -- assume local bindings already caught by surrounding function body (HsLam case)
     HsDo _ (L _ stmts) _ -> stmts & foldl (\syms stmt -> case stmt of
-        LastStmt expr _ _ -> syms { rs_syms = mempty } <> mempty { rs_syms = unravel1 expr & map (\expr' ->
-            let (m_fun, args) = deapp expr'
-                fun = to_expr m_fun
-            in if varString fun == "return"
-                  && length args > 0 -- ensure that it's saturated to avoid pathological case of `return return`, i.e. `IO (a -> IO a)`
-              then head args -- `return` is unambiguously unfolded into the constituent -- BOOKMARK this isn't the place to do this analysis: unpack in the HsApp case, or in the post-processing. This does need to happen -- it's the only way that we can interpret the values going from other monads or pure land into IO, and also accompanied with the IORef cases.
-              else HsApp runIO_var (unravel1 arg1)
-          ) } -- kill the results from all previous stmts because of the semantics of `>>`
+        LastStmt expr _ _ ->
+          let exprs' = unravel1 expr
+          in syms { rs_syms = mempty }
+              <> exprs' {
+                rs_syms = rs_syms exprs' & map (\expr' ->
+                    let (m_fun, args) = deapp expr'
+                        fun = to_expr m_fun
+                    in if varString fun == "return"
+                          && length args > 0 -- ensure that it's saturated to avoid pathological case of `return return`, i.e. `IO (a -> IO a)`
+                      then head args -- `return` is unambiguously unfolded into the constituent -- BOOKMARK this isn't the place to do this analysis: unpack in the HsApp case, or in the post-processing. This does need to happen -- it's the only way that we can interpret the values going from other monads or pure land into IO, and also accompanied with the IORef cases.
+                      else HsApp runIO_var (unravel1 arg1)
+                  ) }-- kill the results from all previous stmts because of the semantics of `>>`
         -- ApplicativeStmt _ _ _ -> undefined -- TODO yet to appear in the wild and be implemented
         BindStmt pat expr _ _ ty ->  -- covered by binds; can't be the last statement anyways -- <- scratch that -- TODO implement this to unbox the monad (requires fake IO structure2)
         BodyStmt expr _ _ _ -> unravel1 expr
@@ -293,10 +306,6 @@ linkIO :: ReduceSyms -> ReduceSyms
 linkIO rs =
   -- need to make an implicit graph, hopefully there are some higher-level graph creation tools, where I just make a UGraph with the adjacency list I essentially have here
   let writes = rs_writes rs
-      
-      reduce_IO :: SymTable -> 
-    
-  
       enum_writes :: Map Pipe Node
       enum_writes = snd $ foldlWithKey (\(idx, acc) k -> const (idx + 1, insert k idx acc)) (0, M.empty) writes
       ref_from_get :: Sym -> Maybe Sym
