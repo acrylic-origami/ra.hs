@@ -54,16 +54,26 @@ import Ra.Extra ( update_head, zipAll )
 
 -- instance ReduceSyms 
 
-type Sym = LHsExpr Id
+data Sym = Sym {
+  is_consumed :: Bool, -- usually Bool for whether it's consumer-passed
+  stack_loc :: StackKey,
+  expr :: LHsExpr Id
+}
+expr_map :: (LHsExpr Id -> LHsExpr Id) -> Sym -> Sym
+expr_map f sym = sym {
+    expr = f $ expr sym
+  }
+  
 type SymTable = Map Id [Sym] -- the list is of a symbol table for partial function apps, and the expression.
 union_sym_tables = unionsWith (++)
 -- ah crap, lambdas. these only apply to IIFEs, but still a pain.
 
-type ThreadKey = [SrcSpan]
+type StackKey = [SrcSpan]
+type ThreadKey = StackKey -- ThreadKey is specialized so only the stack above the latest forkIO call is included
 type Writes = Map Pipe [(ThreadKey, Sym)]
 type Pipe = SrcSpan -- LHsExpr Id
 data ReduceSyms = ReduceSyms {
-  rs_syms :: [Sym],
+  rs_syms :: [(Sym, [[Sym]])], -- fun-args forms
   rs_writes :: Writes
 }
 
@@ -86,7 +96,7 @@ instance Semigroup StackBranch where
     let combine (Just (a_src, a_table)) (Just b@(b_src, b_table)) = assert (a_src == b_src) (second (union_sym_tables . (:[a_table])) b) -- prefer first (accumulating) branch
         combine Nothing (Just b) = b
         combine (Just a) Nothing = a
-    in ((map (uncurry combine)).) . zipAll
+    in curry $ SB . map (uncurry combine) . uncurry zipAll . both unSB
 
 instance Monoid StackBranch where
   mempty = SB mempty
@@ -125,46 +135,49 @@ instance Monoid PatMatchSyms where
 --   (Frame{ sf_id = l }) <= (Frame{ sf_id = r }) = l <= r
   
 is_zeroth_kind :: Sym -> Bool
-is_zeroth_kind sym = case unLoc sym of
-  HsLit _ -> True
-  HsOverLit _ -> True
-  ExplicitTuple _ _ -> True
+is_zeroth_kind sym = case unLoc $ expr sym of
+  HsLit _ _ -> True
+  HsOverLit _ _ -> True
+  ExplicitTuple _ _ _ -> True
   ExplicitList _ _ _ -> True
   _ -> False
 
 to_expr :: Sym -> HsExpr Id
-to_expr = unLoc
-
-mutate_expr :: (HsExpr Id -> HsExpr Id) -> Sym -> Sym
-mutate_expr = fmap -- this just happens to be the Functor definition of GenLocated
+to_expr = unLoc . expr
 
 make_thread_key :: Stack -> ThreadKey
 make_thread_key stack =
-  if not $ null $ st_thread stack
-    then drop ((length $ st_branch stack) - (head $ st_thread stack)) $ map fst $ st_branch stack
+  if not $ null $ st_threads stack
+    then drop ((length $ unSB $ st_branch stack) - (head $ st_threads stack)) $ make_stack_key stack
     else mempty
 
-stack_var_lookup :: Id -> Stack -> Maybe [Sym]
-stack_var_lookup v = branch_var_lookup v . st_branch
+make_stack_key :: Stack -> StackKey
+make_stack_key = map fst . unSB . st_branch
 
-branch_var_lookup :: Id -> StackBranch -> Maybe [Sym]
-branch_var_lookup v = foldr ((\t -> (<|>(t !? v))) . snd . coerce) Nothing  -- for some reason, `coerce` doesn't want to work here from some ambiguity that I can't understand
+stack_var_lookup :: Bool -> Id -> Stack -> Maybe [Sym]
+stack_var_lookup soft v = branch_var_lookup soft v . st_branch
 
-is_visited :: SrcLoc -> Stack -> Bool
-is_visited = (flip elem) . map fst . st_branch
+branch_var_lookup :: Bool -> Id -> StackBranch -> Maybe [Sym]
+branch_var_lookup soft v = foldr ((\t -> (<|>(pick t))) . snd) Nothing . unSB  -- for some reason, `coerce` doesn't want to work here from some ambiguity that I can't understand
+  where pick = if soft
+          then listToMaybe . elems . filterWithKey (const . uncurry (&&) . ((==(varName v)) . varName &&& (eqType (varType v)) . varType))
+          else (!?v)
+
+is_visited :: Stack -> SrcSpan -> Bool
+is_visited = flip elem . map fst . unSB . st_branch
 
 clear_branch :: StackBranch -> StackBranch
-clear_branch = fmap $ map (second (const empty)) . coerce
+clear_branch = SB . map (second (const empty)) . unSB
 
 update_head_table :: SymTable -> StackBranch -> StackBranch
-update_head_table next_table = fmap $ update_head (second ((<>) . (:[next_table])))
+update_head_table next_table = SB . update_head (second (uncurry (<>) . (,next_table))) . unSB
 
 union_branches :: [StackBranch] -> StackBranch
 union_branches = mconcat
 
 runIO_name :: Name
 runIO_name = mkSystemName (mkVarOccUnique $ mkFastString "runIO#") (mkVarOcc "runIO#")
-runIO_sym :: Sym
-runIO_sym = mkLocalVar VanillaId runIO_name ty vanillaIdInfo
+runIO_sym :: LHsExpr Id
+runIO_sym = undefined -- HsVar $ noLoc $ mkLocalVar VanillaId runIO_name (error "Boilerplate to write runIO#'s type in GHC-land not yet written") vanillaIdInfo
 -- union_sym_tables :: [SymTable] -> SymTable
 -- union_sym_tables = unionsWith (++) . map coerce -- TODO check if we need to be more sophisticated than this crude merge

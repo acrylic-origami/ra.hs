@@ -1,5 +1,6 @@
 {-# LANGUAGE Rank2Types, ScopedTypeVariables, LambdaCase, TupleSections, NamedFieldPuns #-}
 module Ra.GHC (
+  deapp,
   grhs_exprs,
   grhs_binds,
   bind_to_table,
@@ -23,6 +24,18 @@ import Ra ( pat_match )
 import Ra.Stack ( Sym, SymTable, PatMatchSyms(..), StackBranch, pms_syms, pms_writes, union_sym_tables )
 import Ra.Extra
 
+unHsWrap :: LHsExpr Id -> LHsExpr Id
+unHsWrap expr = case expr of
+  HsWrap _ _ v -> unHsWrap (fmap (const v) expr)
+  _ -> expr
+
+deapp :: LHsExpr Id -> (LHsExpr Id, [LHsExpr Id])
+deapp expr =
+  let unwrapped = unHsWrap expr
+  in case to_expr unwrapped of
+    HsApp _ l r -> (id *** (++[r])) (deapp l)
+    _ -> (unwrapped, [])
+
 bind_to_table :: StackBranch -> HsBind Id -> PatMatchSyms
 bind_to_table branch b = case b of
   AbsBinds { abs_exports, abs_binds } ->
@@ -35,8 +48,16 @@ bind_to_table branch b = case b of
     in subbinds {
         pms_syms = uncurry (insert abs_sig_export) $ (foldr (++) [] &&& id) $ pms_syms subbinds
       }
+  
+  -------------------
+  -- SYM BASE CASE --
+  -------------------
   FunBind { fun_id = L _ fun_id, fun_matches } -> mempty {
-      pms_syms = singleton fun_id [HsLam fun_matches]
+      pms_syms = singleton fun_id [ Sym {
+        expr = noLoc $ HsLam fun_matches
+        stack_loc = make_stack_key stack
+        is_consumed = False
+      } ]
     }
   PatBind { pat_lhs = L _ pat_lhs, pat_rhs } ->
     let PatMatchSyms next_explicit_binds bind_writes = grhs_binds branch pat_rhs

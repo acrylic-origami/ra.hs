@@ -7,10 +7,11 @@ module Ra (
 import GHC
 import DataCon ( dataConName )
 import Type ( tyConAppTyConPicky_maybe )
+import TyCon ( tyConName )
+import ConLike ( ConLike (..) )
 import Name ( mkSystemName, nameOccName )
 import OccName ( mkVarOcc, occNameString )
 import Unique ( mkVarOccUnique )
-import ConLike ( ConLike (..) )
 import FastString ( mkFastString ) -- for WildPat synthesis
 import Var ( mkLocalVar ) -- for WildPat synthesis
 import IdInfo ( vanillaIdInfo, IdDetails(VanillaId) ) -- for WildPat synthesis
@@ -45,20 +46,8 @@ import Ra.Refs ( write_funs, read_funs )
 -- WHNF is either a literal, data construction, or unknown function app;
 -- Ref holds the expression that spits out the pipe that holds the value[s] that we must trace in a separate traversal over ref types. Note the Located because we use SrcSpan to find specific write instances
 
-unHsWrap :: Sym -> Sym
-unHsWrap sym = case to_expr sym of
-  HsWrap _ v -> unHsWrap (const v <$> sym)
-  _ -> sym
-
-deapp :: Sym -> (Sym, [Sym])
-deapp sym =
-  let unwrapped = unHsWrap sym
-  in case to_expr unwrapped of
-    HsApp l r -> (id *** (++[r])) (deapp l)
-    _ -> (unwrapped, [])
-
 app :: Sym -> [Sym] -> Sym
-app = foldl ((noLoc.) . HsApp) -- one downside is the noLoc on the app, but all the actual exprs are located
+app = foldl (curry $ Sym False mempty . noLoc . uncurry (HsApp NoExt) . both (expr . coerce)) -- one downside is the noLoc on the app, but all the actual exprs are located
 
 pat_multi_match ::
   (Sym -> Maybe [Sym]) -- predicate and expression expander
@@ -147,11 +136,15 @@ reduce_deep stack args sym =
             foldl (\ress args' ->
                 let nf_args' = mconcat $ map (reduce_deep stack []) args'
                 in ReduceSyms {
-                    rs_syms = [ noLoc $ HsApp res arg | res <- rs_syms ress, arg <- rs_syms nf_args' ], -- same issue: noLoc on the apps but all exprs are loc'd
+                    rs_syms = [ Sym {
+                        expr = noLoc $ HsApp NoExt res (expr arg),
+                        stack_loc = make_stack_key stack,
+                        is_consumed = False
+                      } | res <- rs_syms ress, arg <- rs_syms nf_args' ], -- same issue as HsApp reduce rule: noLoc on the apps but all exprs are loc'd
                     rs_writes = unionWith (++) (rs_writes ress) (rs_writes nf_args')
                   }
               )
-          ) -- TODO fishy information loss here on the Sym -> expr conversion; we may need to keep the bindings from any partials, even if it's terminal. This might be temporary anyways
+          ) -- TODO fishy information loss here on the Sym -> expr conversion; we may need to keep the bindings from any partials, even if it's terminal. This might be temporary anyways -- thinking about this, i don't think it's a problem because the terminal HsApps are unresolved names that should never be unravelled
       unravel1 :: Sym -> ReduceSyms
       unravel1 = reduce_deep stack args
       
@@ -168,7 +161,7 @@ reduce_deep stack args sym =
     HsLamCase _ mg -> reduce_deep stack args (HsLam mg)
     
     HsLam _ mg | let loc = getLoc $ mg_alts mg -- <- NB this is why the locations of MatchGroups don't matter
-               , not $ is_visited stack loc -> -- beware about `noLoc`s showing up here: maybe instead break out the pattern matching code
+             , not $ is_visited stack loc -> -- beware about `noLoc`s showing up here: maybe instead break out the pattern matching code
       if matchGroupArity mg > length args
         then terminal
         else
@@ -176,61 +169,74 @@ reduce_deep stack args sym =
                 (unLoc $ mg_alts mg) & mconcat . mconcat . map ( -- over function body alternatives
                   map ( -- over arguments
                     mconcat . map ( -- over possible expressions
-                      uncurry (flip (pat_match stack)) -- share the same stack
+                      uncurry (flip (pat_match (st_branch stack))) -- share the same stack
                     ) . (uncurry zip) . (id *** repeat)
                   ) . zip args . map unLoc . m_pats . unLoc -- `args` FINALLY USED HERE
                 )
               
-              PatMatchSyms next_explicit_binds bind_writes = grhs_binds stack mg
+              PatMatchSyms next_explicit_binds bind_writes = grhs_binds (st_branch stack) mg
               next_exprs = grhs_exprs $ map (grhssGRHSs . m_grhss . unLoc) $ unLoc $ mg_alts mg
               next_frame = (loc, union_sym_tables [pms_syms pat_matches, next_explicit_binds])
               next_stack = stack {
-                  st_branch = (fmap (next_frame:)) $ st_branch stack
+                  st_branch = SB $ second (next_frame:) $ coerce $ st_branch stack
                 }
               next_args = drop (matchGroupArity mg) args
           in mempty { rs_writes = bind_writes <> pms_writes pat_matches } <> (mconcat $ map (reduce_deep next_stack next_args) next_exprs)
           
-    HsVar (L _ v) | Just left_exprs <- stack_var_lookup v stack ->
-      mconcat $ map (reduce_deep stack args) left_exprs -- TODO The whole StackBranch structure is a little screwy, because all of them should eventually lead to lambdas except for unresolvable bindings. Therefore, 
+    HsVar _ (L loc v) ->
+      let args' | a : rest <- args
+                , Just "Consumer" <- (occNameString <$> nameOccName <$> tyConName <$> (tyConAppTyConPicky_maybe $ varType v))
+                  = (map (\b -> b { is_consumed = True }) a) : rest -- identify as consumer-consumed values
+                | otherwise = args
+      in (\rs@(ReduceSyms { rs_syms }) -> -- enforce nesting rule: all invokations on consumed values are consumed
+          rs { rs_syms = map (\sym'@(Sym { is_consumed = is_consumed' }) ->
+              sym' { is_consumed = is_consumed' || is_consumed sym })
+            rs_syms }
+        ) $
+        if | Just left_exprs <- stack_var_lookup True v stack -> -- this absolutely sucks, we have to use the "soft" search because instance name Uniques are totally unusable. Can't even use `Name`, unless I convert to string every time... which I might need to do in the future for performance reasons if I can't come up with a solution for this. 
+            mconcat $ map (reduce_deep stack args) left_exprs
       -- in foldr ((++) . flip (reduce_deep stack) args) [] nf_left
+           | otherwise -> case varString v of
+            ------------------------------------
+            -- *** SPECIAL CASE FUNCTIONS *** --
+            ------------------------------------
+            
+            -- "newEmptyMVar" -> -- return as terminal and identify above
+            -- "newMVar" -> -- find this in post-processing and do it
+            -- "takeMVar" -> if length args >= 1 -- no need, do this in post-processing
+            --   then 
+            --   else terminal
+            
+            -- MAGIC MONADS (fallthrough)
+            ">>" | i:o:_ <- args
+                 , let i' = map unravel1 i
+                       o' = map unravel1 o -> -- magical monad `*>` == `>>`: take right-hand syms, merge writes
+                  mconcat [i'' { rs_syms = mempty } <> o'' | i'' <- i', o'' <- o'] -- combinatorial EXPLOSION! BOOM PEW PEW
+            ">>=" | i:o:args' <- args -> -- magical monad `>>=`: shove the return value from the last stage into the next, merge writes
+                  -- grabbing the writes is as easy as just adding `i` to the arguments; the argument resolution in `terminal` will take care of it
+                  -- under the assumption that it's valid to assume IO is a pure wrapper, this actually just reduces to plain application of a lambda
+                    reduce_deep stack i:args' o
+              
+            "forkIO" | to_fork:rest <- args -> 
+                let next_stack = stack {
+                        st_threads = (length $ coerce $ st_branch stack) : st_threads, -- TODO wait, where was I going with this?
+                        st_branch = SB $ ((loc, M.empty):) $ coerce $ st_branch stack
+                      }
+                    result = mconcat . map (reduce_deep next_stack rest) mempty to_fork
+                in result {
+                    rs_syms = [error "Using the ThreadID from forkIO is not yet supported."]
+                  }
+            "putMVar" -> if length args >= 2
+              then
+                let (pipes:vals:_) = args
+                in ReduceSyms {
+                    rs_syms = terminal,
+                    rs_writes = unionsWith (++) [singleton pipe (make_thread_key stack, arg) | pipe <- pipes, arg <- args]
+                  }
+              else terminal
+            _ -> terminal
       
-    HsVar (L loc v) -> case varString v of
-      -- "newEmptyMVar" -> -- return as terminal and identify above
-      -- "newMVar" -> -- find this in post-processing and do it
-      -- "takeMVar" -> if length args >= 1 -- no need, do this in post-processing
-      --   then 
-      --   else terminal
-      
-      -- MAGIC MONADS (fallthrough)
-      ">>" | i:o:_ <- args
-           , i' = unravel1 i
-           , o' = unravel1 o -> -- magical monad `*>` == `>>`: take right-hand syms, merge writes
-            i' { rs_syms = mempty } <> o'
-      ">>=" | i:o:args' <- args -> -- magical monad `>>=`: shove the return value from the last stage into the next, merge writes
-            -- grabbing the writes is as easy as just adding `i` to the arguments; the argument resolution in `terminal` will take care of it
-            -- under the assumption that it's valid to assume IO is a pure wrapper, this actually just reduces to plain application of a lambda
-              reduce_deep stack i:args' o
-        
-      "forkIO" | to_fork:rest <- args -> 
-          let next_stack = stack {
-                  st_threads = length $ st_branch stack
-                  st_branch = fmap ((loc, M.empty):) $ st_branch stack
-                }
-              result = reduce_deep next_stack rest to_fork
-          in result {
-              rs_syms = [error "Using the ThreadID from forkIO is not yet supported."]
-            }
-      "putMVar" -> if length args >= 2
-        then
-          let (pipes:vals:_) = args
-          in ReduceSyms {
-              rs_syms = terminal,
-              rs_writes = unionsWith (++) [singleton pipe (make_thread_key stack, arg) | pipe <- pipes, arg <- args]
-            }
-        else terminal
-      _ -> terminal
-      
-    HsApp _ _ ->
+    HsApp _ _ _ -> -- this should only come up from the GHC AST, not from our own reduce-unwrap-wrap
       let (fun, next_args) = deapp sym
           passthrough = reduce_deep stack (map pure next_args ++ args) fun
       in case to_expr $ unHsWrap fun of
@@ -286,7 +292,7 @@ reduce_deep stack args sym =
                       else HsApp runIO_var (unravel1 arg1)
                   ) }-- kill the results from all previous stmts because of the semantics of `>>`
         -- ApplicativeStmt _ _ _ -> undefined -- TODO yet to appear in the wild and be implemented
-        BindStmt pat expr _ _ ty ->  -- covered by binds; can't be the last statement anyways -- <- scratch that -- TODO implement this to unbox the monad (requires fake IO structure2)
+        -- BindStmt pat expr _ _ ty ->  -- covered by binds; can't be the last statement anyways -- <- scratch that -- TODO implement this to unbox the monad (requires fake IO structure2)
         BodyStmt expr _ _ _ -> unravel1 expr
         ParStmt -> undefined -- not analyzed for now, because the list comp is too niche (only used for parallel monad comprehensions; see <https://gitlab.haskell.org/ghc/ghc/wikis/monad-comprehensions>)
         -- fun fact: I thought ParStmt was for "parenthesized", but it's "parallel"
