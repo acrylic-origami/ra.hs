@@ -1,4 +1,4 @@
-{-# LANGUAGE TupleSections, DerivingFunctor #-}
+{-# LANGUAGE TupleSections, DeriveFunctor #-}
 module Ra.Lang (
   Sym(..),
   SymTable(..),
@@ -11,21 +11,32 @@ module Ra.Lang (
   Pipe,
   is_zeroth_kind,
   to_expr,
-  mutate_expr,
+  expr_map,
   runIO_sym
 ) where
 
 
 import GHC
+import Var ( varName, varType )
+import Type ( eqType )
 import Outputable (showPpr)
 
-import Data.Tuple.Extra ( second, (***) )
+-- for runIO# synthesis
+import Name ( mkSystemName )
+import OccName ( mkVarOcc )
+import Unique ( mkVarOccUnique )
+import FastString ( mkFastString ) 
+import Var ( mkLocalVar )
+import IdInfo ( vanillaIdInfo, IdDetails(VanillaId) )
+
+import Data.Tuple.Extra ( second, both, (***), (&&&) )
 import Data.Coerce ( coerce )
-import Data.Map.Strict ( Map(..), empty, union, unionWith, unionsWith, toList, fromList, (!?) )
-import qualified Data.Map.Strict as M ( map, mapWithKey )
+import Data.Map.Strict ( Map(..), empty, union, unionWith, unionsWith, toList, fromList, (!?), filterWithKey, elems )
+import qualified Data.Map.Strict as M ( map )
 import Data.Set ( Set(..) )
 import Data.Semigroup ( Semigroup(..), (<>) )
 import Data.Monoid ( Monoid(..), mempty, mconcat )
+import Data.Maybe ( listToMaybe )
 import Control.Applicative ( (<|>) )
 import Control.Exception ( assert )
 
@@ -62,7 +73,9 @@ data PatMatchSyms = PatMatchSyms {
 }
 
 -- type StackTable = SetTree StackFrame -- One entry for every level deep and every invokation in a stack frame, so separate invokations of the same function can be distinguished
-newtype StackBranch = SB [(SrcSpan, SymTable)] deriving Functor -- nodes: consecutive ones are child-parent
+newtype StackBranch = SB [(SrcSpan, SymTable)] -- nodes: consecutive ones are child-parent
+unSB (SB v) = v
+
 data Stack = Stack {
   st_branch :: StackBranch,
   st_threads :: [Int]
