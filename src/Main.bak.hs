@@ -15,6 +15,6 @@ main = runGhc (Just libdir) $ do
     Succeeded -> do
       binds <- (getModSummary $ mkModuleName "A") >>= parseModule >>= typecheckModule >>= desugarModule >>= (return . mg_binds . dm_core_module)
       
-      exprs <- return $ everything (++) ([] `mkQ` (singleton :: HsExpr Id -> [HsExpr Id])) (tm_typechecked_source tc_module)
+      exprs <- return $ everything (++) ([] `mkQ` (singleton :: HsExpr GhcTc -> [HsExpr GhcTc])) (tm_typechecked_source tc_module)
       return ()
     _ -> return ()

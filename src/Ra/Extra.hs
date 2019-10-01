@@ -10,3 +10,8 @@ module Ra.Extra (
   zipAll (a:as) [] = (Just a, Nothing) : zipAll as []
   zipAll [] (b:bs) = (Nothing, Just b) : zipAll [] bs
   zipAll [] [] = []
+  
+  lumpAll :: [[a]] -> [[a]] -> [[a]]
+  lumpAll (x:xs) (y:ys) = (x ++ y) : lumpAll xs ys
+  lumpAll [] (y:ys) = y : lumpAll [] ys
+  lumpAll (x:xs) [] = x : lumpAll xs []
