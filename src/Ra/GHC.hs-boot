@@ -1,24 +1,28 @@
 {-# LANGUAGE Rank2Types #-}
 module Ra.GHC (
+  unHsWrap,
   deapp,
   grhs_exprs,
   grhs_binds,
   bind_to_table,
   mg_drop,
   mg_flip,
-  varString
+  varString,
+  varTyConName
 ) where
 
 import GHC
 import Data.Generics
 
-import Ra.Lang ( SymTable, PatMatchSyms, StackBranch )
+import Ra.Lang ( Stack, SymTable, PatMatchSyms, StackBranch )
 import Ra.Extra
 
-deapp :: LHsExpr Id -> (LHsExpr Id, [LHsExpr Id])
-bind_to_table :: StackBranch -> HsBind Id -> PatMatchSyms
-grhs_exprs :: GenericQ [HsExpr Id]
-grhs_binds :: StackBranch -> GenericQ PatMatchSyms
-mg_drop :: Int -> MatchGroup Id (LHsExpr Id) -> MatchGroup Id (LHsExpr Id)
-mg_flip :: MatchGroup Id (LHsExpr Id) -> MatchGroup Id (LHsExpr Id)
+unHsWrap :: LHsExpr GhcTc -> LHsExpr GhcTc -- almost don't have to export this, except for legit use case for unwrapping `OpApp`s
+deapp :: LHsExpr GhcTc -> (LHsExpr GhcTc, [LHsExpr GhcTc])
+bind_to_table :: Stack -> HsBind GhcTc -> PatMatchSyms
+grhs_exprs :: GenericQ [LHsExpr GhcTc]
+grhs_binds :: Stack -> GenericQ PatMatchSyms
+mg_drop :: Int -> MatchGroup GhcTc (LHsExpr GhcTc) -> MatchGroup GhcTc (LHsExpr GhcTc)
+mg_flip :: MatchGroup GhcTc (LHsExpr GhcTc) -> MatchGroup GhcTc (LHsExpr GhcTc)
 varString :: Id -> String
+varTyConName :: Id -> Maybe String

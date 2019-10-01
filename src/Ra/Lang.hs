@@ -2,17 +2,25 @@
 module Ra.Lang (
   Sym(..),
   SymTable(..),
-  StackBranch,
+  StackBranch(..),
+  unSB,
+  mapSB,
   Stack(..),
   stack_var_lookup,
+  is_visited,
+  make_stack_key,
+  make_thread_key,
   union_sym_tables,
   ReduceSyms(..),
+  append_rs_writes,
+  SymApp(..),
   PatMatchSyms(..),
+  append_pms_writes,
   Pipe,
   is_zeroth_kind,
   to_expr,
   expr_map,
-  runIO_sym
+  runIO_expr
 ) where
 
 
@@ -45,8 +53,8 @@ import Ra.Extra ( update_head, zipAll )
 -- Note about making SymTables from bindings: `Fun` needs to be lifted to `HsExpr` through the `HsLam` constructor. This is to unify the type of the binding to `HsExpr` while retaining MatchGroup which is necessary at HsApp on a named function.
 
 -- class Symbol s where
---   mksym :: HsExpr Id -> s
---   unsym :: s -> HsExpr Id -- this seems really unidiomatic
+--   mksym :: HsExpr GhcTc -> s
+--   unsym :: s -> HsExpr GhcTc -- this seems really unidiomatic
 
 -- instance Symbol Sym where
 --   mksym = id
@@ -57,34 +65,44 @@ import Ra.Extra ( update_head, zipAll )
 data Sym = Sym {
   is_consumed :: Bool, -- usually Bool for whether it's consumer-passed
   stack_loc :: StackKey,
-  expr :: LHsExpr Id
+  expr :: LHsExpr GhcTc
 }
-expr_map :: (LHsExpr Id -> LHsExpr Id) -> Sym -> Sym
+expr_map :: (LHsExpr GhcTc -> LHsExpr GhcTc) -> Sym -> Sym
 expr_map f sym = sym {
     expr = f $ expr sym
   }
   
-type SymTable = Map Id [Sym] -- the list is of a symbol table for partial function apps, and the expression.
+type SymTable = Map Id [SymApp] -- the list is of a symbol table for partial function apps, and the expression.
 union_sym_tables = unionsWith (++)
 -- ah crap, lambdas. these only apply to IIFEs, but still a pain.
 
 type StackKey = [SrcSpan]
 type ThreadKey = StackKey -- ThreadKey is specialized so only the stack above the latest forkIO call is included
-type Writes = Map Pipe [(ThreadKey, Sym)]
-type Pipe = SrcSpan -- LHsExpr Id
+type Writes = Map Pipe [(ThreadKey, SymApp)]
+type Pipe = (Id, ThreadKey) -- LHsExpr GhcTc
+
+data SymApp = SA {
+  sa_sym :: Sym,
+  sa_args :: [[SymApp]]
+} -- 2D tree. Too bad we can't use Tree; the semantics are totally different
 data ReduceSyms = ReduceSyms {
-  rs_syms :: [(Sym, [[Sym]])], -- fun-args forms
+  rs_syms :: [SymApp], -- fun-args forms
   rs_writes :: Writes
 }
+append_rs_writes :: Writes -> ReduceSyms -> ReduceSyms
+append_rs_writes w rs = rs { rs_writes = rs_writes rs <> w }
 
 data PatMatchSyms = PatMatchSyms {
   pms_syms :: SymTable,
   pms_writes :: Writes
 }
+append_pms_writes :: Writes -> PatMatchSyms -> PatMatchSyms
+append_pms_writes w pms = pms { pms_writes = pms_writes pms <> w }
 
 -- type StackTable = SetTree StackFrame -- One entry for every level deep and every invokation in a stack frame, so separate invokations of the same function can be distinguished
 newtype StackBranch = SB [(SrcSpan, SymTable)] -- nodes: consecutive ones are child-parent
 unSB (SB v) = v
+mapSB f = SB . f . unSB
 
 data Stack = Stack {
   st_branch :: StackBranch,
@@ -142,7 +160,7 @@ is_zeroth_kind sym = case unLoc $ expr sym of
   ExplicitList _ _ _ -> True
   _ -> False
 
-to_expr :: Sym -> HsExpr Id
+to_expr :: Sym -> HsExpr GhcTc
 to_expr = unLoc . expr
 
 make_thread_key :: Stack -> ThreadKey
@@ -154,10 +172,10 @@ make_thread_key stack =
 make_stack_key :: Stack -> StackKey
 make_stack_key = map fst . unSB . st_branch
 
-stack_var_lookup :: Bool -> Id -> Stack -> Maybe [Sym]
+stack_var_lookup :: Bool -> Id -> Stack -> Maybe [SymApp]
 stack_var_lookup soft v = branch_var_lookup soft v . st_branch
 
-branch_var_lookup :: Bool -> Id -> StackBranch -> Maybe [Sym]
+branch_var_lookup :: Bool -> Id -> StackBranch -> Maybe [SymApp]
 branch_var_lookup soft v = foldr ((\t -> (<|>(pick t))) . snd) Nothing . unSB  -- for some reason, `coerce` doesn't want to work here from some ambiguity that I can't understand
   where pick = if soft
           then listToMaybe . elems . filterWithKey (const . uncurry (&&) . ((==(varName v)) . varName &&& (eqType (varType v)) . varType))
@@ -177,7 +195,7 @@ union_branches = mconcat
 
 runIO_name :: Name
 runIO_name = mkSystemName (mkVarOccUnique $ mkFastString "runIO#") (mkVarOcc "runIO#")
-runIO_sym :: LHsExpr Id
-runIO_sym = undefined -- HsVar $ noLoc $ mkLocalVar VanillaId runIO_name (error "Boilerplate to write runIO#'s type in GHC-land not yet written") vanillaIdInfo
+runIO_expr :: LHsExpr GhcTc
+runIO_expr = undefined -- HsVar $ noLoc $ mkLocalVar VanillaId runIO_name (error "Boilerplate to write runIO#'s type in GHC-land not yet written") vanillaIdInfo
 -- union_sym_tables :: [SymTable] -> SymTable
 -- union_sym_tables = unionsWith (++) . map coerce -- TODO check if we need to be more sophisticated than this crude merge
