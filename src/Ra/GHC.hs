@@ -87,19 +87,41 @@ bind_to_table stack b = case b of
 grhs_exprs :: GenericQ [LHsExpr GhcTc]
 grhs_exprs x = map (\(L _ (GRHS _ _ body) :: LGRHS GhcTc (LHsExpr GhcTc)) -> body) (concat $ shallowest cast x)
 grhs_binds :: Stack -> GenericQ PatMatchSyms
-grhs_binds stack = everythingBut (<>) (
-    (mempty, False)
-    `mkQ` ((,True) . bind_to_table stack)
-    `extQ` ((,False) . ((\case
-        BindStmt _ (L _ pat) expr _ _ -> pat_match stack pat (SA (Sym False (make_stack_key stack) expr) []) -- TODO check if a fresh stack key here is the right thing to do
-        _ -> mempty
-        ) . unLoc :: LStmt GhcTc (LHsExpr GhcTc) -> PatMatchSyms))
-    `extQ` ((mempty,) . ((\case 
-      HsApp _ _ _ -> True
-      HsLam _ _ -> True
-      _ -> False 
-    ) :: HsExpr GhcTc -> Bool)) -- guard against applications and lambdas, which introduce bindings we need to dig into a scope to bind
-  )
+grhs_binds stack = let go :: Bool -> GenericQ PatMatchSyms
+      go is_do = uncurry (bool mempty) . (
+          uncurry (<>) . (
+            -- cat the results from the current iteration with the [maybe] recursion
+              mconcat . uncurry gmapQ . (
+                -- split the element down to the recursion `go` with a decision if it's a `do` or not, and the element itself
+                  go . (is_do `mkQ` ((\case
+                      HsDo _ _ _ -> True
+                      _ -> False
+                    ) :: HsExpr GhcTc -> Bool))
+                  &&& id
+                )
+                &&& mempty
+                  `mkQ` bind_to_table stack
+                  `extQ` ((\case
+                      BindStmt _ (L _ pat) expr _ _ -> pat_match stack pat (SA (Sym False (make_stack_key stack) expr) []) -- TODO check if a fresh stack key here is the right thing to do
+                      _ -> mempty
+                    ) . unLoc :: LStmt GhcTc (LHsExpr GhcTc) -> PatMatchSyms)
+                  `extQ` ((\expr -> case expr of
+                      HsApp _ _ _ -> mempty
+                      HsLam _ _ -> mempty
+                      -- HsDo _ _ _ -> True -- DONE: thought further. Will extend with case only for `let` stmts -- TODO dubious case: think further
+                      _ -> go is_do expr
+                    ) :: HsExpr GhcTc -> PatMatchSyms)
+            )
+          &&& True `mkQ` ((\case 
+            -- provide the boolean guard for the places we stop
+            -- opposite polarity of `everythingBut` because of the partial on `bool`
+            HsApp _ _ _ -> False
+            HsLam _ _ -> False
+            -- HsDo _ _ _ -> True -- DONE: thought further. Will extend with case only for `let` stmts -- TODO dubious case: think further
+            _ -> False 
+          ) :: HsExpr GhcTc -> Bool)
+        )
+  in go False
 
 mg_rearg :: (forall a. [a] -> [a]) -> MatchGroup GhcTc (LHsExpr GhcTc) -> MatchGroup GhcTc (LHsExpr GhcTc)
 mg_rearg f mg = mg {
