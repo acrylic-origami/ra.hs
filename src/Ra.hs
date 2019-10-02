@@ -150,7 +150,7 @@ reduce_deep stack sa@(SA sym args) =
       mksym = Sym False (make_stack_key stack)
       mklocsym = flip Sym (make_stack_key stack)
       
-      -- fail = error $ constr_ppr sym
+      fail = error $ "FAIL" ++ (constr_ppr $ expr $ sym)
   in case unLoc $ expr sym of
     HsLamCase _ mg -> unravel1 (HsLam undefined mg <$ expr sym) []
     
@@ -184,11 +184,14 @@ reduce_deep stack sa@(SA sym args) =
                 | otherwise = args
       in (\rs@(ReduceSyms { rs_syms }) -> -- enforce nesting rule: all invokations on consumed values are consumed
           rs {
-              rs_syms = map (\sa -> sa { sa_sym = (sa_sym sa) { is_consumed = is_consumed (sa_sym sa) || is_consumed sym } }) rs_syms
+              rs_syms = map (\sa' -> sa' { sa_sym = (sa_sym sa') { is_consumed = is_consumed (sa_sym sa') || is_consumed sym } }) rs_syms
             }
         ) $
-        if | Just left_syms <- stack_var_lookup True v stack -> -- this absolutely sucks, we have to use the "soft" search because instance name Uniques are totally unusable. Can't even use `Name`, unless I convert to string every time... which I might need to do in the future for performance reasons if I can't come up with a solution for this. 
-            mconcat $ map (\sa' -> reduce_deep stack $ sa' { sa_args = sa_args sa' ++ args }) left_syms
+        if | varString v == "debug#" ->
+              -- DEBUG SYMBOL
+              mempty
+           | Just left_syms <- stack_var_lookup True v stack -> -- this absolutely sucks, we have to use the "soft" search because instance name Uniques are totally unusable. Can't even use `Name`, unless I convert to string every time... which I might need to do in the future for performance reasons if I can't come up with a solution for this. 
+            mconcat $ map (\sa' -> reduce_deep stack $ sa' { sa_args = sa_args sa' ++ args' }) left_syms
       -- in foldr ((++) . flip (reduce_deep stack) args) [] nf_left
            | otherwise -> case varString v of
             ------------------------------------
@@ -275,13 +278,16 @@ reduce_deep stack sa@(SA sym args) =
       in mempty { rs_writes = bind_writes } <> (mconcat $ map (\next_expr -> reduce_deep (stack { st_branch = mapSB (next_frame:) (st_branch stack) }) (sa { sa_sym = sym { expr = next_expr } })) next_exprs) -- TODO check that record update with sym (and its location) is the right move here
       
     HsLet _ _ expr -> unravel1 expr [] -- assume local bindings already caught by surrounding function body (HsLam case)
-    HsDo _ _ (L _ stmts) -> foldl (\syms (L _ stmt) -> case stmt of
-        LastStmt _ expr _ _ -> syms { rs_syms = mempty } <> unravel1 expr [] -- kill the results from all previous stmts because of the semantics of `>>`
-        -- ApplicativeStmt _ _ _ -> undefined -- TODO yet to appear in the wild and be implemented
-        -- BindStmt pat expr _ _ ty ->  -- covered by binds; can't be the last statement anyways -- <- scratch that -- TODO implement this to unbox the monad (requires fake IO structure2)
-        BodyStmt _ expr _ _ -> unravel1 expr []
-        ParStmt _ _ _ _ -> undefined -- not analyzed for now, because the list comp is too niche (only used for parallel monad comprehensions; see <https://gitlab.haskell.org/ghc/ghc/wikis/monad-comprehensions>)
-        -- fun fact: I thought ParStmt was for "parenthesized", but it's "parallel"
+    HsDo _ _ (L _ stmts) -> foldl (\syms (L _ stmt) ->
+        case stmt of
+          LastStmt _ expr _ _ -> syms { rs_syms = mempty } <> unravel1 expr [] -- kill the results from all previous stmts because of the semantics of `>>`
+          -- ApplicativeStmt _ _ _ -> undefined -- TODO yet to appear in the wild and be implemented
+          BindStmt pat expr _ _ ty -> syms -- covered by binds; can't be the last statement anyways -- <- scratch that -- TODO implement this to unbox the monad (requires fake IO structure2) -- <- scratch THAT, we're not going to do anything because the binds are covered in grhs_binds; we're letting IO and other magic monads be unravelled into their values contained within to simplify analysis
+          LetStmt _ _ -> syms -- same story as BindStmt
+          BodyStmt _ expr _ _ -> syms { rs_syms = mempty } <> unravel1 expr []
+          ParStmt _ _ _ _ -> undefined -- not analyzed for now, because the list comp is too niche (only used for parallel monad comprehensions; see <https://gitlab.haskell.org/ghc/ghc/wikis/monad-comprehensions>)
+          _ -> fail
+          -- fun fact: I thought ParStmt was for "parenthesized", but it's "parallel"
       ) mempty stmts -- push all the work to another round of `reduce_deep`.
     
     -- Terminal forms

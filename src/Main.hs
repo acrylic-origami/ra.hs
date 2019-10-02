@@ -14,6 +14,7 @@ module Main where
   import Data.Generics.Extra ( constr_ppr, shallowest, everything_ppr )
   import qualified Data.Map.Strict as M ( empty )
   import Data.Tuple.Extra ( (&&&), (***) )
+  import Control.Monad ( mzero )
   
   import Ra ( pat_match, reduce )
   import Ra.GHC ( bind_to_table )
@@ -55,7 +56,8 @@ module Main where
                 st_branch = SB [(noSrcSpan, M.empty)]
               }) . unLoc) tl_binds
       -- return $ show $ map (M.mapKeys ppr . M.map (map toConstr) . snd) initial_branch
-      return $ concatMap ((++"\n") . ppr_sa dflags) $ concatMap (rs_syms . reduce initial_table) ((concat $ shallowest cast (last tl_binds)) :: [LHsExpr GhcTc])
+      -- pure ()
+      return $ concatMap ((++"\n") . ppr_sa (showPpr dflags)) $ concatMap (rs_syms . reduce initial_table) (map (expr . sa_sym) $ (!!1) $ M.elems $ initial_table)
       
       -- return $ show $ map (show_sym dflags) $ concatMap (flip (reduce_deep $ [(noSrcSpan, SymTable $ unionsWith (++) $ map (bind_to_table ([(noSrcSpan, SymTable M.empty)]) . unLoc) $ bagToList (typecheckedSource t))]) []) ((concat $ shallowest cast (last $ bagToList (typecheckedSource t))) :: [HsExpr GhcTc])
       

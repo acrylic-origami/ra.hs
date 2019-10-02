@@ -93,7 +93,7 @@ grhs_binds stack = everythingBut (<>) (
     `extQ` ((,False) . ((\case
         BindStmt _ (L _ pat) expr _ _ -> pat_match stack pat (SA (Sym False (make_stack_key stack) expr) []) -- TODO check if a fresh stack key here is the right thing to do
         _ -> mempty
-        ) . unLoc :: LStmt GhcTc (LHsExpr GhcTc) -> PatMatchSyms))
+        ) . unLoc :: LStmt GhcTc (LHsExpr GhcTc) -> PatMatchSyms)) -- TODO dangerous: should we really keep looking deeper after finding a BindStmt?
     `extQ` ((mempty,) . ((\case 
       HsApp _ _ _ -> True
       HsLam _ _ -> True
@@ -115,7 +115,7 @@ mg_drop x = mg_rearg $ drop x -- i don't see why i couldn't do `mg_rearg . drop`
 mg_flip = mg_rearg (\(a:b:ns) -> b:a:ns)
 
 varString = occNameString . nameOccName . varName
-varTyConName = fmap (occNameString . nameOccName . GHCTyCon.tyConName) . tyConAppTyConPicky_maybe . varType
+varTyConName = fmap (occNameString . nameOccName . GHCTyCon.tyConName) . tyConAppTyConPicky_maybe . snd . splitForAllTys . varType
 
 -- instance Applicative (GenLocated a) where
 --   pure = L noLoc
