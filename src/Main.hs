@@ -18,6 +18,7 @@ module Main where
   import Ra ( pat_match, reduce )
   import Ra.GHC ( bind_to_table )
   import Ra.Lang ( SymTable, Sym(..), SymApp(..), StackBranch(..), unSB, Stack(..), pms_syms, rs_syms )
+  import Ra.Lang.Extra ( ppr_sa )
 
   import Outputable ( Outputable, interppSP, showSDocUnsafe, showPpr )
 
@@ -54,7 +55,7 @@ module Main where
                 st_branch = SB [(noSrcSpan, M.empty)]
               }) . unLoc) tl_binds
       -- return $ show $ map (M.mapKeys ppr . M.map (map toConstr) . snd) initial_branch
-      return $ show $ map (showPpr dflags . expr . sa_sym) $ concatMap (rs_syms . reduce initial_table) ((concat $ shallowest cast (last tl_binds)) :: [LHsExpr GhcTc])
+      return $ concatMap ((++"\n") . ppr_sa dflags) $ concatMap (rs_syms . reduce initial_table) ((concat $ shallowest cast (last tl_binds)) :: [LHsExpr GhcTc])
       
       -- return $ show $ map (show_sym dflags) $ concatMap (flip (reduce_deep $ [(noSrcSpan, SymTable $ unionsWith (++) $ map (bind_to_table ([(noSrcSpan, SymTable M.empty)]) . unLoc) $ bagToList (typecheckedSource t))]) []) ((concat $ shallowest cast (last $ bagToList (typecheckedSource t))) :: [HsExpr GhcTc])
       
