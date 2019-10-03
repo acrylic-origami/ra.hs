@@ -77,8 +77,9 @@ pat_match stack pat sa =
     WildPat ty ->
       let fake_name = mkSystemName (mkVarOccUnique $ mkFastString "_") (mkVarOcc "_")
           fake_var = mkLocalVar VanillaId fake_name ty vanillaIdInfo
-      in mempty {
-          pms_syms = singleton fake_var [sa]
+      in PatMatchSyms {
+          pms_syms = singleton fake_var (rs_syms nf_syms),
+          pms_writes = rs_writes nf_syms
         }
     -- wrapper
     LazyPat _ (L _ pat) -> pat_match stack pat sa
@@ -86,8 +87,9 @@ pat_match stack pat sa =
     BangPat _ (L _ pat) -> pat_match stack pat sa
     -- SigPatOut (L _ pat) _ -> pat_match stack pat sa
     -- base
-    VarPat _ (L _ v) -> mempty {
-        pms_syms = singleton v [sa]
+    VarPat _ (L _ v) -> PatMatchSyms {
+        pms_syms = singleton v (rs_syms nf_syms),
+        pms_writes = rs_writes nf_syms
       }
     LitPat _ _ -> mempty -- no new name bindings
     NPat _ _ _ _ -> mempty

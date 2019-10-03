@@ -12,13 +12,13 @@ module Main where
   import Data.Map.Strict ( unionsWith, keys, toList )
   import Data.Generics ( cast, mkQ, extQ, everything, toConstr, Data(..) )
   import Data.Generics.Extra ( constr_ppr, shallowest, everything_ppr )
-  import qualified Data.Map.Strict as M ( empty )
+  import qualified Data.Map.Strict as M ( empty, elems )
   import Data.Tuple.Extra ( (&&&), (***) )
   import Control.Monad ( mzero )
   
   import Ra ( pat_match, reduce )
   import Ra.GHC ( bind_to_table )
-  import Ra.Lang ( SymTable, Sym(..), SymApp(..), StackBranch(..), unSB, Stack(..), pms_syms, rs_syms )
+  import Ra.Lang ( SymTable, Sym(..), SymApp(..), StackBranch(..), unSB, Stack(..), ReduceSyms(..), pms_syms, rs_syms )
   import Ra.Lang.Extra ( ppr_sa )
 
   import Outputable ( Outputable, interppSP, showSDocUnsafe, showPpr )
@@ -57,7 +57,7 @@ module Main where
               }) . unLoc) tl_binds
       -- return $ show $ map (M.mapKeys ppr . M.map (map toConstr) . snd) initial_branch
       -- pure ()
-      return $ concatMap ((++"\n") . ppr_sa (showPpr dflags)) $ concatMap (rs_syms . reduce initial_table) (map (expr . sa_sym) $ (!!1) $ M.elems $ initial_table)
+      return $ uncurry (++) $ (concatMap ((++"\n") . ppr_sa (showPpr dflags)) . rs_syms &&& concatMap ((++"\n") . ppr_sa (showPpr dflags) . snd) . concat . M.elems . rs_writes) $ reduce initial_table $ (expr $ sa_sym $ head $ (!!1) $ M.elems $ initial_table)
       
       -- return $ show $ map (show_sym dflags) $ concatMap (flip (reduce_deep $ [(noSrcSpan, SymTable $ unionsWith (++) $ map (bind_to_table ([(noSrcSpan, SymTable M.empty)]) . unLoc) $ bagToList (typecheckedSource t))]) []) ((concat $ shallowest cast (last $ bagToList (typecheckedSource t))) :: [HsExpr GhcTc])
       

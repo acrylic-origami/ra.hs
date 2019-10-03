@@ -1,7 +1,7 @@
 {-# LANGUAGE MagicHash #-}
 
 module H where
-
+import Control.Concurrent.MVar
 debug# :: a
 debug# = undefined
 
@@ -11,7 +11,9 @@ foo :: IO Int
 foo = do
   let x = 42
       y = bar x
-  return y
+  v <- newEmptyMVar
+  _ <- putMVar v y
+  readMVar v
 
 bar :: Consumer a a
 bar x = x
