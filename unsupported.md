@@ -1,5 +1,10 @@
 Things I'm not supporting in v1:
 
+- Pattern matches
+	- Pattern matching is core to static analysis. It greatly enhances specificity by replacing the very weak law that anything entering a constructor might be incident on an argument to one much more nuanced, where certain parts and certain program locations can be part incident on certain locations. The results can then be hyper-specific, naming even the constructions that might be at a certain location, e.g. causing race conditions in rahse's case. **However:**
+		1. Pattern matching + pipe resolution together create unknown instances after a single run of `reduce_deep`. This is because values coming out of pipes that need to be pattern-matched need to be paused until _all_ values are definitely extracted from the pipe, including ones that could be written _within expressions depending on the value being bound_. It's not as simple to avoid cycles here because processing these values are deferred for a given reduce iteration, and hence must hold onto all their stack information.
+		2. `do` blocks that have bound values suffer, because statements below the binding rely on the binding for values, and hence require re-running after the final binding[s], although which ones are hard to pin down and requires another sweep of recursion over the AST.
+	- This is an extremely high-priority feature that has an equally tall barrier to overcome. Note the plumbing for pattern matching is already in place for pure code and single iterations over stateful code. However, the entire structure of the program needs to be overhauled to support this feature in its most glorious generality.
 - Record syntax patterns
 	- Lots of complications:
 		1. Record update is actually very annoying to represent, as the desugared version is an updater for every field
