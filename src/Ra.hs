@@ -70,56 +70,63 @@ pat_match ::
 -- all new matches from the pat match; M.empty denotes the match failed (we'll bind wildcards under `_` which will be ignored later since it's an illegal variable and function name)
 -- Valid HsExpr: HsApp, OpApp, NegApp, ExplicitTuple, ExplicitList, (SectionL, SectionR) (for data types that are named by operators, e.g. `:`; I might not support this in v1 because it's so thin)
 -- Valid Pat:
-pat_match stack pat sa =
+pat_match _ pat sa =
   let nf_syms = reduce_deep stack sa
-  in case pat of
-    -- M.empty
-    WildPat ty ->
-      let fake_name = mkSystemName (mkVarOccUnique $ mkFastString "_") (mkVarOcc "_")
-          fake_var = mkLocalVar VanillaId fake_name ty vanillaIdInfo
-      in PatMatchSyms {
-          pms_syms = singleton fake_var (rs_syms nf_syms),
-          pms_writes = rs_writes nf_syms
-        }
-    -- wrapper
-    LazyPat _ (L _ pat) -> pat_match stack pat sa
-    ParPat _ (L _ pat) -> pat_match stack pat sa
-    BangPat _ (L _ pat) -> pat_match stack pat sa
-    -- SigPatOut (L _ pat) _ -> pat_match stack pat sa
-    -- base
-    VarPat _ (L _ v) -> PatMatchSyms {
-        pms_syms = singleton v (rs_syms nf_syms),
-        pms_writes = rs_writes nf_syms
-      }
-    LitPat _ _ -> mempty -- no new name bindings
-    NPat _ _ _ _ -> mempty
-    -- container
-    ListPat _ pats -> mconcat $ map (\(L _ pat') -> pat_match stack pat' sa) pats -- encodes the logic that all elements of a list might be part of the pattern regardless of order
-    AsPat _ (L _ bound) (L _ pat') -> mempty { pms_syms = singleton bound [sa] } <> pat_match stack pat' sa -- NB this should also be disjoint (between the binding and the internal pattern); just guard in case
-    TuplePat _ pats _ ->
-      let matcher (SA _ (x:_)) = error "Argument on explicit tuple. Perhaps a tuple section, which isn't supported yet."
-          matcher (SA sym' []) = case unLoc $ expr sym' of
-            ExplicitTuple _ args'' _ ->
-              pat_multi_match stack (map unLoc pats) $ map ((\case
-                  Present _ expr' -> [SA ((sa_sym sa) { expr = expr' }) []] -- NB encodes the assumption that we should preserve the original location of creation for this object, rather than this unravelling point because the datatype decompositions are trivial and can't define an object's identity
-                  Missing _ -> error "Tuple sections aren't supported yet."
-                ) . unLoc) args''
-            _ -> mempty
-          next_pms = mconcat $ catMaybes $ map matcher (rs_syms nf_syms)
-      in append_pms_writes (rs_writes nf_syms) next_pms
+  in PatMatchSyms {
+      pms_syms = foldr (flip M.insert (rs_syms nf_syms)) M.empty $ everything (++) ([] `mkQ` ((\(HsVar _ (L _ v)) -> [v]) :: HsExpr GhcTc -> Id)) pat
+      pms_writes = rs_writes nf_syms
+    }
+    
+-- pat_match stack pat sa =
+--   let nf_syms = reduce_deep stack sa
+--   in case pat of
+--     -- M.empty
+--     WildPat ty ->
+--       let fake_name = mkSystemName (mkVarOccUnique $ mkFastString "_") (mkVarOcc "_")
+--           fake_var = mkLocalVar VanillaId fake_name ty vanillaIdInfo
+--       in PatMatchSyms {
+--           pms_syms = singleton fake_var (rs_syms nf_syms),
+--           pms_writes = rs_writes nf_syms
+--         }
+--     -- wrapper
+--     LazyPat _ (L _ pat) -> pat_match stack pat sa
+--     ParPat _ (L _ pat) -> pat_match stack pat sa
+--     BangPat _ (L _ pat) -> pat_match stack pat sa
+--     -- SigPatOut (L _ pat) _ -> pat_match stack pat sa
+--     -- base
+--     VarPat _ (L _ v) -> PatMatchSyms {
+--         pms_syms = singleton v (rs_syms nf_syms),
+--         pms_writes = rs_writes nf_syms
+--       }
+--     LitPat _ _ -> mempty -- no new name bindings
+--     NPat _ _ _ _ -> mempty
+--     -- container
+--     ListPat _ pats -> mconcat $ map (\(L _ pat') -> pat_match stack pat' sa) pats -- encodes the logic that all elements of a list might be part of the pattern regardless of order
+--     AsPat _ (L _ bound) (L _ pat') -> mempty { pms_syms = singleton bound [sa] } <> pat_match stack pat' sa -- NB this should also be disjoint (between the binding and the internal pattern); just guard in case
+--     TuplePat _ pats _ ->
+--       let matcher (SA _ (x:_)) = error "Argument on explicit tuple. Perhaps a tuple section, which isn't supported yet."
+--           matcher (SA sym' []) = case unLoc $ expr sym' of
+--             ExplicitTuple _ args'' _ ->
+--               pat_multi_match stack (map unLoc pats) $ map ((\case
+--                   Present _ expr' -> [SA ((sa_sym sa) { expr = expr' }) []] -- NB encodes the assumption that we should preserve the original location of creation for this object, rather than this unravelling point because the datatype decompositions are trivial and can't define an object's identity
+--                   Missing _ -> error "Tuple sections aren't supported yet."
+--                 ) . unLoc) args''
+--             _ -> mempty
+--           next_pms = mconcat $ catMaybes $ map matcher (rs_syms nf_syms)
+--       in append_pms_writes (rs_writes nf_syms) next_pms
         
-    ConPatOut{ pat_con = L _ (RealDataCon pat_con'), pat_args = d_pat_args } -> case d_pat_args of
-      PrefixCon pats ->
-        let matcher (SA sym' args') | (L _ (HsConLikeOut _ (RealDataCon con)), args'') <- deapp (expr sym') -- sym' is in NF thanks to pat_multi_match; this assumes it
-                                    , dataConName con == dataConName pat_con'
-                                      = let flat_args = ((map (\arg'' -> pure $ SA (sym' { expr = arg'' }) []) args'') ++ args') -- [[SymApp]]
-                                        in pat_multi_match stack (map unLoc pats) flat_args
-                                    | otherwise = mempty
-            next_pms = mconcat $ catMaybes $ map matcher (rs_syms nf_syms)
-        in append_pms_writes (rs_writes nf_syms) next_pms
+--     ConPatOut{ pat_con = L _ (RealDataCon pat_con'), pat_args = d_pat_args } -> case d_pat_args of
+--       PrefixCon pats ->
+--         let matcher (SA sym' args') | (L _ (HsConLikeOut _ (RealDataCon con)), args'') <- deapp (expr sym') -- sym' is in NF thanks to pat_multi_match; this assumes it
+--                                     , dataConName con == dataConName pat_con'
+--                                       = let flat_args = ((map (\arg'' -> pure $ SA (sym' { expr = arg'' }) []) args'') ++ args') -- [[SymApp]]
+--                                         in pat_multi_match stack (map unLoc pats) flat_args
+--                                     | otherwise = mempty
+--             next_pms = mconcat $ catMaybes $ map matcher (rs_syms nf_syms)
+--         in append_pms_writes (rs_writes nf_syms) next_pms
         
-      RecCon _ -> error "Record syntax yet to be implemented"
-    _ -> error $ constr_ppr pat
+--       RecCon _ -> error "Record syntax yet to be implemented"
+--     _ -> error $ constr_ppr pat
 
 reduce :: SymTable -> LHsExpr GhcTc -> ReduceSyms -- symtable for ambient declarations
 reduce table expr = reduce_deep (mempty { st_branch = SB [(noSrcSpan, table)] }) (SA (Sym False [] expr) [])
