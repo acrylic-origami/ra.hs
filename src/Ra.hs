@@ -17,6 +17,7 @@ import SrcLoc ( noSrcSpan )
 import Var ( mkLocalVar ) -- for WildPat synthesis
 import IdInfo ( vanillaIdInfo, IdDetails(VanillaId) ) -- for WildPat synthesis
 
+import Data.List ( intersect )
 import Data.Coerce ( coerce )
 import Data.Char ( isLower )
 import Data.Tuple ( swap )
@@ -31,9 +32,10 @@ import Control.Monad ( guard )
 import Control.Applicative ( (<|>), liftA2 )
 import Control.Exception ( assert )
 
-import Data.Map.Strict ( Map(..), unionsWith, unions, unionWith, union, singleton, (!?), (!), foldlWithKey, foldrWithKey, keys, elems, insert, mapWithKey)
-import qualified Data.Map.Strict as M ( null, empty )
-import qualified Data.Set as S ( fromList )
+import Data.Map.Strict ( Map(..), unionsWith, unions, unionWith, union, singleton, (!?), (!), foldlWithKey, foldrWithKey, keys, elems, mapWithKey)
+import qualified Data.Map.Strict as M ( null, empty, insert )
+import Data.Set ( Set(..) )
+import qualified Data.Set as S ( fromList, member, insert )
 -- import qualified Data.Set as S ( insert )
 
 import qualified Ra.Refs as Refs
@@ -73,7 +75,7 @@ pat_match ::
 pat_match _ pat sa =
   let nf_syms = reduce_deep stack sa
   in PatMatchSyms {
-      pms_syms = foldr (flip M.insert (rs_syms nf_syms)) M.empty $ everything (++) ([] `mkQ` ((\(HsVar _ (L _ v)) -> [v]) :: HsExpr GhcTc -> Id)) pat
+      pms_syms = foldr (flip M.insert (rs_syms nf_syms)) M.empty $ everything (++) ([] `mkQ` ((\(HsVar _ (L _ v)) -> [v]) :: HsExpr GhcTc -> Id)) pat,
       pms_writes = rs_writes nf_syms
     }
     
@@ -81,6 +83,7 @@ pat_match _ pat sa =
 --   let nf_syms = reduce_deep stack sa
 --   in case pat of
 --     -- M.empty
+--     -- BOOKMARK: reroute all bound variables nested within to VarPat behavior (equal to the whole incoming `sa` expression)
 --     WildPat ty ->
 --       let fake_name = mkSystemName (mkVarOccUnique $ mkFastString "_") (mkVarOcc "_")
 --           fake_var = mkLocalVar VanillaId fake_name ty vanillaIdInfo
@@ -102,27 +105,32 @@ pat_match _ pat sa =
 --     NPat _ _ _ _ -> mempty
 --     -- container
 --     ListPat _ pats -> mconcat $ map (\(L _ pat') -> pat_match stack pat' sa) pats -- encodes the logic that all elements of a list might be part of the pattern regardless of order
---     AsPat _ (L _ bound) (L _ pat') -> mempty { pms_syms = singleton bound [sa] } <> pat_match stack pat' sa -- NB this should also be disjoint (between the binding and the internal pattern); just guard in case
+--     AsPat _ (L _ bound) (L _ pat') ->
+--       let matches = pat_match stack pat' sa
+--       in if M.null pms_syms
+--         then matches
+--         else matches <> mempty { pms_syms = singleton bound [sa] } -- TODO test this: the outer binding and inner pattern are related: the inner pattern must succeed for the outer one to as well. 
 --     TuplePat _ pats _ ->
---       let matcher (SA _ (x:_)) = error "Argument on explicit tuple. Perhaps a tuple section, which isn't supported yet."
---           matcher (SA sym' []) = case unLoc $ expr sym' of
+--       let matcher (SA _ _ (x:_)) = error "Argument on explicit tuple. Perhaps a tuple section, which isn't supported yet."
+--           matcher (SA _ sym' _) = case unLoc $ expr sym' of
 --             ExplicitTuple _ args'' _ ->
 --               pat_multi_match stack (map unLoc pats) $ map ((\case
---                   Present _ expr' -> [SA ((sa_sym sa) { expr = expr' }) []] -- NB encodes the assumption that we should preserve the original location of creation for this object, rather than this unravelling point because the datatype decompositions are trivial and can't define an object's identity
+--                   Present _ expr' -> [SA [] ((sa_sym sa) { expr = expr' }) []] -- NB encodes the assumption that we should preserve the original location of creation for this object, rather than this unravelling point because the datatype decompositions are trivial and can't define an object's identity
 --                   Missing _ -> error "Tuple sections aren't supported yet."
 --                 ) . unLoc) args''
 --             _ -> mempty
---           next_pms = mconcat $ catMaybes $ map matcher (rs_syms nf_syms)
+--           next_pms = mconcat $ map matcher (rs_syms nf_syms)
 --       in append_pms_writes (rs_writes nf_syms) next_pms
         
 --     ConPatOut{ pat_con = L _ (RealDataCon pat_con'), pat_args = d_pat_args } -> case d_pat_args of
 --       PrefixCon pats ->
---         let matcher (SA sym' args') | (L _ (HsConLikeOut _ (RealDataCon con)), args'') <- deapp (expr sym') -- sym' is in NF thanks to pat_multi_match; this assumes it
---                                     , dataConName con == dataConName pat_con'
---                                       = let flat_args = ((map (\arg'' -> pure $ SA (sym' { expr = arg'' }) []) args'') ++ args') -- [[SymApp]]
---                                         in pat_multi_match stack (map unLoc pats) flat_args
---                                     | otherwise = mempty
---             next_pms = mconcat $ catMaybes $ map matcher (rs_syms nf_syms)
+--         let matcher (SA consumers' sym' args') -- | (L _ (HsConLikeOut _ (RealDataCon con)), args'') <- deapp (expr sym') -- sym' is in NF thanks to pat_multi_match; this assumes it
+--                                                -- , dataConName con == dataConName pat_con' -- TEMP disable name matching on constructor patterns, to allow symbols to always be bound to everything
+--                                                 -- = let flat_args = ((map (\arg'' -> [SA [] (sym' { expr = arg'' }) []]) args'') ++ args') -- [[SymApp]]
+--                                                 -- pat_multi_match stack (map unLoc pats) flat_args
+--                                                | True = mconcat $ map (flip (pat_match stack) sa . unLoc) pats
+--                                                | otherwise = mempty
+--             next_pms = mconcat $ map matcher (rs_syms nf_syms)
 --         in append_pms_writes (rs_writes nf_syms) next_pms
         
 --       RecCon _ -> error "Record syntax yet to be implemented"
@@ -136,7 +144,7 @@ reduce_deep :: Stack -> SymApp -> ReduceSyms
 reduce_deep _ sa | let args = sa_args sa
                        sym = sa_sym sa
                  , length args > 0 && is_zeroth_kind sym = error $ "Application on " ++ (show $ toConstr $ expr sym)
-reduce_deep stack sa@(SA sym args) =
+reduce_deep stack sa@(SA consumers sym args) =
   -------------------
   -- SYM BASE CASE --
   -------------------
@@ -153,7 +161,7 @@ reduce_deep stack sa@(SA sym args) =
           sa_sym = sym {
               expr = target
             },
-          sa_args = (map (map (\arg -> SA sym { expr = arg } [])) new_args ++ args) -- NB `consumed` law: `is_consumed` property at least distributes over App; if the leftmost var is of type `Consumer`, then it might make some args `consumed` as well.
+          sa_args = (map (map (\arg -> SA sym { expr = arg } [])) new_args ++ args) -- NB `consumed` law: `consumers` property at least distributes over App; if the leftmost var is of type `Consumer`, then it might make some args `consumed` as well.
         }
       
       mksym = Sym False (make_stack_key stack)
@@ -187,13 +195,14 @@ reduce_deep stack sa@(SA sym args) =
           in mempty { rs_writes = bind_writes <> pms_writes pat_matches } <> (mconcat $ map (\next_expr -> reduce_deep next_stack $ SA { sa_sym = sym { expr = next_expr }, sa_args =  next_args }) next_exprs) -- TODO check if the sym record update + args are correct for this stage
           
     HsVar _ (L loc v) ->
-      let args' | a:rest <- args
+      let args' | arg1:rest <- args
                 , Just "Consumer" <- varTyConName v
-                  = (map (\b -> b { sa_sym = (sa_sym b) { is_consumed = True } }) a) : rest -- identify as consumer-consumed values
+                  = (map (\b -> b { sa_consumers = make_stack_key stack : (sa_consumers b) }) arg1) : rest -- identify as consumer-consumed values
+                   -- TODO refactor with lenses
                 | otherwise = args
       in (\rs@(ReduceSyms { rs_syms }) -> -- enforce nesting rule: all invokations on consumed values are consumed
           rs {
-              rs_syms = map (\sa' -> sa' { sa_sym = (sa_sym sa') { is_consumed = is_consumed (sa_sym sa') || is_consumed sym } }) rs_syms
+              rs_syms = map (\sa' -> sa' { sa_consumers = sa_consumers sa' ++ consumers }) rs_syms
             }
         ) $
         if | varString v == "debug#" ->
@@ -241,12 +250,11 @@ reduce_deep stack sa@(SA sym args) =
               then
                 let (pipes:vals:_) = args'
                 in terminal {
-                    rs_writes = rs_writes terminal <> unionsWith (++) [
-                        singleton (unLoc pipe_id, stack_loc $ sa_sym m_pipe) [(make_thread_key stack, val)]
-                          | m_pipe <- pipes
+                    rs_writes = unionWith (++) (rs_writes terminal) (unionsWith (++) [
+                        singleton (stack_loc $ sa_sym pipe) [(make_thread_key stack, val)]
+                          | pipe <- pipes
                           , val <- vals
-                          , (HsVar _ pipe_id) <- [unLoc $ expr $ sa_sym m_pipe] -- hax? o/w not sure how to pattern match in a list comprehension
-                      ]
+                      ])
                   }
               else terminal
             _ -> terminal
@@ -309,3 +317,41 @@ reduce_deep stack sa@(SA sym args) =
     ExplicitList _ _ _ -> terminal
     -- ExplicitPArr _ _ -> terminal
     _ -> error ("Incomplete coverage of HsExpr rules: encountered " ++ (show $ toConstr $ expr sym))
+
+type Violation = (StackKey, StackKey)
+linkIO :: Writes -> [Violation] -- consumer-pipe violated pairs
+linkIO ws = concat $ elems $ mapWithKey (\p w -> map (,p) (pred w (lookup_deep mempty p))) ws where
+  pred :: [Write] -> [Write] -> [StackKey] -- consumers with a conflict on these writes
+  pred (normal:rest_normals) enemies =
+    pred rest_normals enemies
+    ++ concatMap (intersect (sa_consumers $ snd normal) . sa_consumers . snd) enemies
+    ++ (concatMap (\normal' ->
+        if fst normal /= fst normal'
+          then (sa_consumers $ snd normal) `intersect` (sa_consumers $ snd normal')
+          else []
+      ) rest_normals)
+  pred [] (enemy:rest_enemies) = -- TODO verify not overlapping with "normal" runs due to traisitivty
+    pred [] rest_enemies
+    ++ concatMap (intersect (sa_consumers $ snd enemy) . sa_consumers . snd) rest_enemies
+  pred [] [] = []
+    
+  lookup_deep :: Set Pipe -> Pipe -> [Write] -- new writes on this pipe: these have "enemy" thread semantics
+  lookup_deep visited p | not $ S.member p visited =
+    let dig_write :: SymApp -> [Write]
+        dig_write sa = -- resolve new writes from this write (if this write is composed of reads)
+          if | HsVar _ v <- unLoc $ expr $ sa_sym sa
+             , (varString $ unLoc v) == "readMVar"
+             , (length $ sa_args sa) >= 1
+               -> concatMap dig_metapipe (head $ sa_args sa) -- head of args should be the pipe
+             | otherwise -> []
+        
+        dig_metapipe :: SymApp -> [Pipe]
+        dig_metapipe sa =
+          let syms = case unLoc $ expr $ sa_sym sa of
+                      HsVar _ v' -> case (varString $ unLoc v') of
+                        "newMVar" -> ws ! (stack_loc $ sa_sym sa) -- TODO verify stack_loc always coincides with the logged location of the pipe
+                        "readMVar" -> map (sa_sym . snd) $ lookup_deep (S.insert p visited) sa -- resolve meta-pipe; don't worry about discarding the thread info from the write, as this pipe as a _value_ will be handled in another iteration through the Writes table
+                        _ -> [] -- expect the only things to arrive at a 
+          in concatMap (map (fmap (\sa' -> sa' { sa_args = (sa_args sa') ++ (tail $ sa_args sa) }))) syms
+    in concatMap dig_write (ws ! p)
+  lookup_deep _ _ = []

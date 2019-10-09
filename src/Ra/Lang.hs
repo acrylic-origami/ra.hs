@@ -3,6 +3,8 @@ module Ra.Lang (
   Sym(..),
   SymTable(..),
   StackBranch(..),
+  StackKey,
+  ThreadKey,
   unSB,
   mapSB,
   Stack(..),
@@ -16,6 +18,8 @@ module Ra.Lang (
   SymApp(..),
   PatMatchSyms(..),
   append_pms_writes,
+  Write,
+  Writes,
   Pipe,
   is_zeroth_kind,
   to_expr,
@@ -63,10 +67,14 @@ import Ra.Extra ( update_head, zipAll )
 -- instance ReduceSyms 
 
 data Sym = Sym {
-  is_consumed :: Bool, -- usually Bool for whether it's consumer-passed
   stack_loc :: StackKey,
   expr :: LHsExpr GhcTc
 }
+instance Eq Sym where
+  (Sym loc1 _) == (Sym loc2 _) = loc1 == loc2
+instance Ord Sym where
+  (Sym loc1 _) <= (Sym loc2 _) = loc1 <= loc2
+
 expr_map :: (LHsExpr GhcTc -> LHsExpr GhcTc) -> Sym -> Sym
 expr_map f sym = sym {
     expr = f $ expr sym
@@ -78,10 +86,15 @@ union_sym_tables = unionsWith (++)
 
 type StackKey = [SrcSpan]
 type ThreadKey = StackKey -- ThreadKey is specialized so only the stack above the latest forkIO call is included
-type Writes = Map Pipe [(ThreadKey, SymApp)]
-type Pipe = (Id, ThreadKey) -- LHsExpr GhcTc
+type Write = (ThreadKey, SymApp)
+type Writes = Map Pipe [Write]
+type Pipe = StackKey -- LHsExpr GhcTc
 
 data SymApp = SA {
+  sa_consumers :: [StackKey],
+    -- laws for `consumers`:
+    -- 1. if a term is consumed and decomposed or part of an unknown/partial application, the whole term is consumed under the same consumer[s]
+    -- 2. if a term goes through multiple consumers, they're all tracked for races individually
   sa_sym :: Sym,
   sa_args :: [[SymApp]]
 } -- 2D tree. Too bad we can't use Tree; the semantics are totally different
