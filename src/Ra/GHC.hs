@@ -30,7 +30,7 @@ import Data.Semigroup ( (<>) )
 import Data.Map.Strict ( unionWith, unionsWith, insert, singleton, empty, fromList, (!?) )
 
 import Ra ( pat_match )
-import Ra.Lang ( Stack(..), SymApp(..), Sym(..), SymTable, PatMatchSyms(..), StackBranch(..), unSB, mapSB, pms_syms, pms_writes, union_sym_tables, is_consumed, stack_loc, make_stack_key )
+import Ra.Lang ( Stack(..), SymApp(..), Sym(..), SymTable(..), PatMatchSyms(..), StackBranch(..), unSB, mapSB, union_sym_tables, stack_loc, make_stack_key )
 import Ra.Extra
 
 unHsWrap :: LHsExpr GhcTc -> LHsExpr GhcTc
@@ -63,22 +63,25 @@ bind_to_table stack b = case b of
   -------------------
   FunBind { fun_id = L _ fun_id, fun_matches } -> mempty {
       pms_syms = singleton fun_id [ SA {
+          sa_consumers = mempty,
           sa_sym = Sym {
               expr = noLoc $ HsLam NoExt fun_matches,
-              stack_loc = make_stack_key stack,
-              is_consumed = False
+              stack_loc = make_stack_key stack
             },
           sa_args = []
         } ]
     }
   PatBind { pat_lhs = L _ pat_lhs, pat_rhs } ->
-    let PatMatchSyms next_explicit_binds bind_writes = grhs_binds stack pat_rhs
+    let pms@(PatMatchSyms {
+          pms_syms = next_explicit_binds,
+          pms_writes = bind_writes
+        }) = grhs_binds stack pat_rhs
         stack' = stack {
             st_branch = mapSB (update_head (second (union_sym_tables . (:[next_explicit_binds])))) (st_branch stack)
           }
         next_exprs = grhs_exprs pat_rhs
-        next_tables = map (pat_match stack' pat_lhs . flip SA [] . Sym False (make_stack_key stack)) next_exprs -- TODO confirm that making a fresh stack key here is the right thing to do
-    in mempty { pms_writes = bind_writes } <> mconcat next_tables
+        next_pms = mconcat $ map (pat_match stack' pat_lhs . flip (SA []) [] . Sym (make_stack_key stack)) next_exprs -- TODO confirm that making a fresh stack key here is the right thing to do
+    in pms { pms_syms = mempty } <> next_pms
   VarBind{} -> mempty
   _ -> error $ constr_ppr b
 
@@ -91,7 +94,7 @@ grhs_binds stack = everythingBut (<>) (
     (mempty, False)
     `mkQ` ((,True) . bind_to_table stack)
     `extQ` ((,False) . ((\case
-        BindStmt _ (L _ pat) expr _ _ -> pat_match stack pat (SA (Sym False (make_stack_key stack) expr) []) -- TODO check if a fresh stack key here is the right thing to do
+        BindStmt _ (L _ pat) expr _ _ -> pat_match stack pat (SA [] (Sym (make_stack_key stack) expr) []) -- TODO check if a fresh stack key here is the right thing to do
         _ -> mempty
         ) . unLoc :: LStmt GhcTc (LHsExpr GhcTc) -> PatMatchSyms)) -- TODO dangerous: should we really keep looking deeper after finding a BindStmt?
     `extQ` ((mempty,) . ((\case 

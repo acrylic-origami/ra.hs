@@ -1,8 +1,10 @@
-{-# LANGUAGE TupleSections, DeriveFunctor #-}
+{-# LANGUAGE TupleSections, DeriveFunctor, UndecidableInstances #-}
 module Ra.Lang (
   Sym(..),
   SymTable(..),
   StackBranch(..),
+  StackKey,
+  ThreadKey(..),
   unSB,
   mapSB,
   Stack(..),
@@ -11,12 +13,18 @@ module Ra.Lang (
   make_stack_key,
   make_thread_key,
   union_sym_tables,
+  update_head_table,
   ReduceSyms(..),
-  append_rs_writes,
-  SymApp(..),
   PatMatchSyms(..),
   append_pms_writes,
+  append_rs_writes,
+  SymApp(..),
+  Write(..),
+  Writes(..),
+  Hold(..),
   Pipe,
+  ReduceStateMachine(..),
+  is_parent,
   is_zeroth_kind,
   to_expr,
   expr_map,
@@ -63,10 +71,14 @@ import Ra.Extra ( update_head, zipAll )
 -- instance ReduceSyms 
 
 data Sym = Sym {
-  is_consumed :: Bool, -- usually Bool for whether it's consumer-passed
   stack_loc :: StackKey,
   expr :: LHsExpr GhcTc
 }
+instance Eq Sym where
+  (Sym loc1 _) == (Sym loc2 _) = loc1 == loc2
+instance Ord Sym where
+  (Sym loc1 _) <= (Sym loc2 _) = loc1 <= loc2
+
 expr_map :: (LHsExpr GhcTc -> LHsExpr GhcTc) -> Sym -> Sym
 expr_map f sym = sym {
     expr = f $ expr sym
@@ -77,32 +89,71 @@ union_sym_tables = unionsWith (++)
 -- ah crap, lambdas. these only apply to IIFEs, but still a pain.
 
 type StackKey = [SrcSpan]
-type ThreadKey = StackKey -- ThreadKey is specialized so only the stack above the latest forkIO call is included
-type Writes = Map Pipe [(ThreadKey, SymApp)]
-type Pipe = (Id, ThreadKey) -- LHsExpr GhcTc
+data ThreadKey = TKNormal StackKey | TKEnemy -- ThreadKey is specialized so only the stack above the latest forkIO call is included
+data Write = Write {
+  w_stack :: Stack,
+  w_sym :: SymApp
+} -- ThreadKey for the thread the write happens, StackKey for dedupeing writes in the top-level state machine
+
+-- Write instances allowing them to be keys
+-- instance Eq Write where
+--   (Write l_stack _) == (Write r_stack _) = l_loc == r_loc
+
+-- instance Ord Write where
+--   (Write l_stack _) <= (Write r_stack _) = l_loc <= r_loc
+  
+type Writes = Map Pipe [Write]
+type Pipe = StackKey -- LHsExpr GhcTc
 
 data SymApp = SA {
+  sa_consumers :: [StackKey],
+    -- laws for `consumers`:
+    -- 1. if a term is consumed and decomposed or part of an unknown/partial application, the whole term is consumed under the same consumer[s]
+    -- 2. if a term goes through multiple consumers, they're all tracked for races individually
   sa_sym :: Sym,
   sa_args :: [[SymApp]]
 } -- 2D tree. Too bad we can't use Tree; the semantics are totally different
-data ReduceSyms = ReduceSyms {
-  rs_syms :: [SymApp], -- fun-args forms
-  rs_writes :: Writes
+data Hold = Hold {
+  h_pat :: Pat GhcTc,
+  h_sym :: SymApp,
+  h_stack :: Stack
 }
-append_rs_writes :: Writes -> ReduceSyms -> ReduceSyms
-append_rs_writes w rs = rs { rs_writes = rs_writes rs <> w }
 
 data PatMatchSyms = PatMatchSyms {
   pms_syms :: SymTable,
+  pms_holds :: [Hold],
   pms_writes :: Writes
 }
-append_pms_writes :: Writes -> PatMatchSyms -> PatMatchSyms
-append_pms_writes w pms = pms { pms_writes = pms_writes pms <> w }
+data ReduceSyms = ReduceSyms {
+  rs_syms :: [SymApp],
+  rs_holds :: [Hold],
+  rs_writes :: Writes
+}
 
--- type StackTable = SetTree StackFrame -- One entry for every level deep and every invokation in a stack frame, so separate invokations of the same function can be distinguished
+-- data Syms t = Syms {
+--   ss_syms :: t SymApp,
+--   ss_holds :: [Hold],
+--   ss_writes :: Writes
+-- }
+-- type ReduceSyms = Syms []
+-- type PatMatchSyms = Syms (Map Id) -- can't use SymTable because partially-applied type synonyms are illegal. This trouble to keep Syms generalized is getting very close to impractical
+
+append_rs_writes ws rs = rs {
+  rs_writes = unionWith (++) (rs_writes rs) ws
+}
+append_pms_writes ws pms = pms {
+  pms_writes = unionWith (++) (pms_writes pms) ws
+}
+
 newtype StackBranch = SB [(SrcSpan, SymTable)] -- nodes: consecutive ones are child-parent
 unSB (SB v) = v
 mapSB f = SB . f . unSB
+
+instance Eq StackBranch where
+  (==) = (curry $ uncurry (==) . both (map fst . unSB))
+  
+instance Ord StackBranch where
+  (<=) = (curry $ uncurry (<=) . both (map fst . unSB))
 
 data Stack = Stack {
   st_branch :: StackBranch,
@@ -128,29 +179,38 @@ instance Monoid Stack where
   mappend = (<>)
 
 instance Semigroup ReduceSyms where
-  (ReduceSyms lsyms lwrites) <> (ReduceSyms rsyms rwrites) = ReduceSyms (lsyms <> rsyms) (unionWith (++) lwrites rwrites) -- is there a nicer way to do this?
+  (ReduceSyms lsyms lholds lwrites) <> (ReduceSyms rsyms rholds rwrites) = ReduceSyms (lsyms <> rsyms) (lholds <> rholds) (unionWith (++) lwrites rwrites) -- is there a nicer way to do this?
   
-  -- vs. (<>) = curry $ uncurry ReduceSyms . ((uncurry (++) . fmap rs_syms) &&& (uncurry (unionWith (++)) . fmap rs_syms))
+  -- vs. (<>) = curry $ uncurry ReduceSyms . ((uncurry (++) . fmap rs_syms) &&& (uncurry (unionWith (++)) . fmap ss_syms))
 
 instance Monoid ReduceSyms where
-  mempty = ReduceSyms mempty mempty
+  mempty = ReduceSyms mempty mempty mempty
+  mappend = (<>)
+
+
+instance Semigroup PatMatchSyms where
+  (PatMatchSyms lsyms lholds lwrites) <> (PatMatchSyms rsyms rholds rwrites) = PatMatchSyms (unionWith (++) lsyms rsyms) (lholds <> rholds) (unionWith (++) lwrites rwrites)
+  
+instance Monoid PatMatchSyms where
+  mempty = PatMatchSyms mempty mempty mempty
   mappend = (<>)
   
-instance Semigroup PatMatchSyms where
-  (PatMatchSyms lsyms lwrites) <> (PatMatchSyms rsyms rwrites) = PatMatchSyms (union_sym_tables [lsyms, rsyms]) (unionWith (++) lwrites rwrites)
+data ReduceStateMachine = RSM {
+  -- rs_writes :: Set StackKey,
+  -- rs_holds :: Set StackKey,
+  rsm_stacks :: [Stack], -- extra bit of state for memoization and to enable stop condition
+  rsm_syms :: (ReduceSyms, ReduceSyms) -- the magic hat we're pulling all the rabbits out of; a 2-stack for new and old (resp.), so that we can have a halt condition based on the number of new writes (when the left is a subset of the right, we're done)
+}
 
-instance Monoid PatMatchSyms where
-  mempty = PatMatchSyms mempty mempty
+instance Semigroup ReduceStateMachine where
+  (RSM l_stacks l_syms) <> (RSM r_stacks r_syms) =
+      RSM
+        (l_stacks <> r_stacks)
+        (l_syms <> r_syms)
+  
+instance Monoid ReduceStateMachine where
+  mempty = RSM mempty mempty
   mappend = (<>)
-
--- data StackFrame = Frame {
---   sf_id :: Maybe Id,
---   sf_table :: SymTable
--- }
--- instance Eq StackFrame where
---   (Frame{ sf_id = l }) == (Frame{ sf_id = r }) = l == r
--- instance Ord StackFrame where
---   (Frame{ sf_id = l }) <= (Frame{ sf_id = r }) = l <= r
   
 is_zeroth_kind :: Sym -> Bool
 is_zeroth_kind sym = case unLoc $ expr sym of
@@ -164,7 +224,7 @@ to_expr :: Sym -> HsExpr GhcTc
 to_expr = unLoc . expr
 
 make_thread_key :: Stack -> ThreadKey
-make_thread_key stack =
+make_thread_key stack = TKNormal $
   if not $ null $ st_threads stack
     then drop ((length $ unSB $ st_branch stack) - (head $ st_threads stack)) $ make_stack_key stack
     else mempty
@@ -184,11 +244,19 @@ branch_var_lookup soft v = foldr ((\t -> (<|>(pick t))) . snd) Nothing . unSB  -
 is_visited :: Stack -> SrcSpan -> Bool
 is_visited = flip elem . map fst . unSB . st_branch
 
+is_parent :: StackBranch -> StackBranch -> Bool
+is_parent = curry $ uncurry (&&) . (
+    uncurry (<) . both length
+    &&& and . map (uncurry (==) . both fst) . uncurry zip
+  ) . both unSB
+
 clear_branch :: StackBranch -> StackBranch
 clear_branch = SB . map (second (const empty)) . unSB
 
-update_head_table :: SymTable -> StackBranch -> StackBranch
-update_head_table next_table = SB . update_head (second (uncurry (<>) . (,next_table))) . unSB
+update_head_table :: SymTable -> Stack -> Stack
+update_head_table next_table st = st {
+  st_branch = SB $ update_head (second (uncurry (<>) . (,next_table))) $ unSB $ st_branch st
+}
 
 union_branches :: [StackBranch] -> StackBranch
 union_branches = mconcat

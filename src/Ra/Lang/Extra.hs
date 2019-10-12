@@ -23,7 +23,7 @@ ppr_sa show' = go 0 where
           uncurry (++)
           . (
               uncurry (++) . (
-                  bool "" "*" . is_consumed . sa_sym
+                  bool "" "*" . not . null . sa_consumers
                   &&& ((indent ++ "<")++) . (show' . expr . sa_sym)
                 )
               &&& concatMap (
