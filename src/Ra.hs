@@ -57,18 +57,16 @@ pat_multi_match ::
   -> [Pat GhcTc]
   -> [[SymApp]]
   -> Maybe PatMatchSyms
-pat_multi_match stack pats args | let matches = map (uncurry ((mconcat.) . map . pat_match stack)) (zip pats args)
-                                , and $ map (not . M.null . pms_syms) matches
-                                  = Just $ mconcat matches -- filter (not . M.null . pms_syms) $ map (uncurry (pat_match stack)) zipped_pat_args
-                                      
-                                | otherwise = Nothing
+pat_multi_match stack pats args =
+  let matches = map (uncurry ((mconcat.) . map . pat_match stack)) (zip pats args)
+  in foldl1 (<>) matches
 
 -- invoke as: `unions . concatMap (map ((unions . concatMap . pat_match table) . unLoc) . zip args . m_pats) mg_alts` on `MatchGroup`'s `mg_alts`
 pat_match ::
   Stack
   -> Pat GhcTc
   -> SymApp
-  -> PatMatchSyms -- the new bindings in _this stack frame only_, even if new ones are resolved above and below
+  -> Maybe PatMatchSyms -- the new bindings in _this stack frame only_, even if new ones are resolved above and below
 -- all new matches from the pat match; M.empty denotes the match failed (we'll bind wildcards under `_` which will be ignored later since it's an illegal variable and function name)
 -- Valid HsExpr: HsApp, OpApp, NegApp, ExplicitTuple, ExplicitList, (SectionL, SectionR) (for data types that are named by operators, e.g. `:`; I might not support this in v1 because it's so thin)
 -- Valid Pat:
@@ -78,39 +76,37 @@ pat_match stack pat sa =
     ---------------------------------
     -- *** UNWRAPPING PATTERNS *** --
     ---------------------------------
-    WildPat ty -> mempty { pms_writes = rs_writes nf_syms } -- TODO check if this is the right [write, haha] behavior
+    WildPat ty -> Just $ mempty { pms_writes = rs_writes nf_syms } -- TODO check if this is the right [write, haha] behavior
     -- wrapper
     LazyPat _ (L _ pat) -> pat_match stack pat sa
     ParPat _ (L _ pat) -> pat_match stack pat sa
     BangPat _ (L _ pat) -> pat_match stack pat sa
     -- SigPatOut (L _ pat) _ -> pat_match stack pat sa
     -- base
-    VarPat _ (L _ v) -> mempty {
+    VarPat _ (L _ v) -> Just $ mempty {
         pms_syms = singleton v (rs_syms nf_syms),
         pms_writes = rs_writes nf_syms
       }
-    LitPat _ _ -> mempty -- no new name bindings
-    NPat _ _ _ _ -> mempty
+    LitPat _ _ -> Just mempty -- no new name bindings
+    NPat _ _ _ _ -> Just mempty
     -- container
     ListPat _ pats -> mconcat $ map (\(L _ pat') -> pat_match stack pat' sa) pats -- encodes the logic that all elements of a list might be part of the pattern regardless of order
     AsPat _ (L _ bound) (L _ pat') -> -- error "At patterns (@) aren't yet supported."
       let matches = pat_match stack pat' sa
-      in if M.null $ pms_syms matches
-        then matches
-        else matches <> mempty { pms_syms = singleton bound [sa] } -- note: `at` patterns can't be formally supported, because they might contain sub-patterns that need to hold. They also violate the invariant that "held" pattern targets have a read operation on their surface. However, since this only makes the test _less sensitive_, we'll try as hard as we can and just miss some things later.
+      in (mappend (mempty { pms_syms = singleton bound [sa] })) <$> matches -- note: `at` patterns can't be formally supported, because they might contain sub-patterns that need to hold. They also violate the invariant that "held" pattern targets have a read operation on their surface. However, since this only makes the test _less sensitive_, we'll try as hard as we can and just miss some things later.
         -- TODO test this: the outer binding and inner pattern are related: the inner pattern must succeed for the outer one to as well.
         
     -------------------------------
     -- *** MATCHING PATTERNS *** --
     -------------------------------
-    _ -> next_pms { -- TODO consider generic joining function
-      pms_writes = pms_writes next_pms <> rs_writes nf_syms,
-      pms_holds = pms_holds next_pms <> rs_holds nf_syms
-    } where
-      next_pms = mconcat $ map pat_match' (rs_syms $ nf_syms)
+    _ -> fmap (\pms -> pms { -- TODO consider generic joining function
+      pms_writes = pms_writes pms <> rs_writes nf_syms,
+      pms_holds = pms_holds pms <> rs_holds nf_syms
+    }) next_pms where
+      next_pms = mconcat $ map pat_match' (rs_syms nf_syms)
       pat_match' sa | HsVar _ v  <- unLoc $ expr $ sa_sym sa
                     , "readMVar" == (varString $ unLoc v)
-                    = mempty {
+                    = Just $ mempty { -- TODO sketchy making this a "hit" when it's not yet matched
                         pms_holds = pure $ Hold {
                             h_pat = pat,
                             h_sym = sa,
@@ -126,9 +122,9 @@ pat_match stack pat sa =
                       Present _ expr' -> [SA [] ((sa_sym sa) { expr = expr' }) []] -- NB encodes the assumption that we should preserve the original location of creation for this object, rather than this unravelling point because the datatype decompositions are trivial and can't define an object's identity
                       Missing _ -> error "Tuple sections aren't supported yet."
                     ) . unLoc) args''
-                _ -> mempty
-              next_pms' = mconcat $ catMaybes $ map matcher (rs_syms nf_syms)
-          in append_pms_writes (rs_writes nf_syms) next_pms'
+                _ -> Nothing
+              next_pms' = mconcat $ map matcher (rs_syms nf_syms) -- note the monoid definition of Maybe distributes the cat into ReduceSym `Just`s
+          in (append_pms_writes (rs_writes nf_syms)) <$> next_pms'
           
         ConPatOut{ pat_con = L _ (RealDataCon pat_con'), pat_args = d_pat_args } -> case d_pat_args of
           PrefixCon pats ->
@@ -136,9 +132,9 @@ pat_match stack pat sa =
                                                    , dataConName con == dataConName pat_con' -- TEMP disable name matching on constructor patterns, to allow symbols to always be bound to everything
                                                     = let flat_args = ((map (\arg'' -> [SA [] (sym' { expr = arg'' }) []]) args'') ++ args') -- [[SymApp]]
                                                       in pat_multi_match stack (map unLoc pats) flat_args
-                                                   | otherwise = mempty
-                next_pms' = mconcat $ catMaybes $ map matcher (rs_syms nf_syms)
-            in append_pms_writes (rs_writes nf_syms) next_pms'
+                                                   | otherwise = Nothing
+                next_pms' = mconcat $ map matcher (rs_syms nf_syms)
+            in (append_pms_writes (rs_writes nf_syms)) <$> next_pms'
         
           RecCon _ -> error "Record syntax yet to be implemented"
           
@@ -158,12 +154,14 @@ reduce table root =
                             _ -> []
                          | otherwise = [sa]
       
+      -- BOOKMARK break at terminal and 
+      
       -- expand_writes :: Syms a -> Writes SymApp -- BOOKMARK: ADD VISITED SET!!!
       -- -- for every pipe, make a set of terminal symbols written from different threads, updating the threads to be enemies -- this is so that we can pat-match knowing these are as terminal as we can get them; then expect pattern matching to screen out the duds (mostly unresolved functions, especially writes) -- IMPORTANT POINT: DON'T COMMIT THE OUTPUT TO MEMORY: we're going to re-expand every pipe every time
       -- expand_writes ss = M.map (concatMap ((expand_reads (rs_writes ss)) . w_sym) (rs_writes ss))
       
       expand_hold :: Writes -> Hold -> PatMatchSyms
-      expand_hold ws h = mconcat $ map (pat_match (h_stack h) (h_pat h)) (expand_reads ws (h_sym h))
+      expand_hold ws h = mconcat $ catMaybes $ map (pat_match (h_stack h) (h_pat h)) (expand_reads ws (h_sym h))
       
       left_outer_writes :: Writes -> Writes -> Writes
       left_outer_writes l r =
@@ -251,7 +249,7 @@ reduce_deep stack sa@(SA consumers sym args) =
           let pat_matches =
                 (unLoc $ mg_alts mg) & mconcat . mconcat . map ( -- over function body alternatives
                   map ( -- over arguments
-                    mconcat . map ( -- over possible expressions
+                    mconcat . catMaybes . map ( -- over possible expressions
                       uncurry (flip (pat_match stack)) -- share the same stack
                     ) . (uncurry zip) . (id *** repeat)
                   ) . zip (sa_args sa) . map unLoc . m_pats . unLoc -- `args` FINALLY USED HERE
