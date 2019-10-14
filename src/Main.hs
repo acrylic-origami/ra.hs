@@ -19,7 +19,7 @@ module Main where
   import Ra ( pat_match, reduce )
   import Ra.GHC ( bind_to_table )
   import Ra.Lang ( SymTable, Sym(..), SymApp(..), StackBranch(..), unSB, Stack(..), ReduceSyms(..), PatMatchSyms(..), Write(..) )
-  import Ra.Lang.Extra ( ppr_sa )
+  import Ra.Lang.Extra ( ppr_sa, ppr_rs )
 
   import Outputable ( Outputable, interppSP, showSDocUnsafe, showPpr )
 
@@ -57,18 +57,20 @@ module Main where
               }) . unLoc) tl_binds
       -- return $ show $ map (M.mapKeys ppr . M.map (map toConstr) . snd) initial_branch
       -- pure ()
-      return $ uncurry (++) $ (
-          concatMap (
-              (++"\n") . ppr_sa (showPpr dflags)
-            )
-          . rs_syms &&& concatMap (
-            (++"\n")
-            . ppr_sa (showPpr dflags)
-            . w_sym)
-          . concat
-          . M.elems
-          . rs_writes
-        ) $ reduce initial_table $ (expr $ sa_sym $ head $ (!!1) $ M.elems $ initial_table)
+      -- return $ uncurry (++) $ (
+      --     concatMap (
+      --         (++"\n") . ppr_sa (showPpr dflags)
+      --       )
+      --     . rs_syms &&& concatMap (
+      --       (++"\n")
+      --       . ppr_sa (showPpr dflags)
+      --       . w_sym)
+      --     . concat
+      --     . M.elems
+      --     . rs_writes
+      --   ) $ reduce initial_table $ (expr $ sa_sym $ head $ (!!1) $ M.elems $ initial_table)
+      
+      return $ ppr_rs (showPpr dflags) $ reduce initial_table $ (expr $ sa_sym $ head $ (!!1) $ M.elems $ initial_table)
       
       -- return $ show $ map (show_sym dflags) $ concatMap (flip (reduce_deep $ [(noSrcSpan, SymTable $ unionsWith (++) $ map (bind_to_table ([(noSrcSpan, SymTable M.empty)]) . unLoc) $ bagToList (typecheckedSource t))]) []) ((concat $ shallowest cast (last $ bagToList (typecheckedSource t))) :: [HsExpr GhcTc])
       
