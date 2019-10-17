@@ -19,7 +19,7 @@ module Main where
   import Ra ( pat_match, reduce )
   import Ra.GHC ( bind_to_table )
   import Ra.Lang ( SymTable, Sym(..), SymApp(..), StackBranch(..), unSB, Stack(..), ReduceSyms(..), PatMatchSyms(..), Write(..) )
-  import Ra.Lang.Extra ( ppr_sa, ppr_rs )
+  import Ra.Lang.Extra
 
   import Outputable ( Outputable, interppSP, showSDocUnsafe, showPpr )
 
@@ -27,7 +27,7 @@ module Main where
   ppr = showSDocUnsafe . interppSP . pure
   
   ppr_branch :: StackBranch -> String
-  ppr_branch = foldr ((++) . (++"---\n\n") . foldr ((++) . (++"\n\n") . uncurry (++) . (((++", ") . ppr) *** concatMap (ppr . expr . sa_sym))) "" . toList . snd) "" . unSB
+  ppr_branch = foldr ((++) . (++"---\n\n") . foldr ((++) . (++"\n\n") . uncurry (++) . (((++", ") . ppr) *** concatMap (ppr . sa_sym))) "" . toList . snd) "" . unSB
 
   main :: IO ()
   main = do
@@ -52,7 +52,7 @@ module Main where
       -- return $ show $ map (showPpr dflags) ((concat $ shallowest cast (last tl_binds)) :: [HsExpr GhcTc]) -- ) []
       
       let tl_binds = bagToList (typecheckedSource t)
-          initial_table = unionsWith (++) $ map (pms_syms . bind_to_table (mempty {
+          initial_pms = mconcat $ map (bind_to_table (mempty {
                 st_branch = SB [(noSrcSpan, M.empty)]
               }) . unLoc) tl_binds
       -- return $ show $ map (M.mapKeys ppr . M.map (map toConstr) . snd) initial_branch
@@ -68,9 +68,15 @@ module Main where
       --     . concat
       --     . M.elems
       --     . rs_writes
-      --   ) $ reduce initial_table $ (expr $ sa_sym $ head $ (!!1) $ M.elems $ initial_table)
+      --   ) $ reduce initial_table $ (sa_sym $ head $ (!!1) $ M.elems $ initial_table)
       
-      return $ ppr_rs (showPpr dflags) $ reduce initial_table $ (expr $ sa_sym $ head $ (!!1) $ M.elems $ initial_table)
+      let rs = reduce (pms_syms initial_pms) $ (sa_sym $ head $ (!!1) $ M.elems $ (pms_syms initial_pms))
+      -- return $ ppr_pms (showPpr dflags) initial_pms
+      return $ ppr_rs (showPpr dflags) $ rs {
+        rs_writes = M.unionWith (++) (pms_writes initial_pms) (rs_writes rs),
+        rs_holds = pms_holds initial_pms <> rs_holds rs
+      }
+      -- return $ concatMap (uncurry ((++) . (++" -> ")) . (showPpr dflags *** concatMap (showPpr dflags . getLoc . (\(HsLam _ m) -> mg_alts m) . unLoc . sa_sym))) $ M.assocs $ pms_syms initial_pms
       
       -- return $ show $ map (show_sym dflags) $ concatMap (flip (reduce_deep $ [(noSrcSpan, SymTable $ unionsWith (++) $ map (bind_to_table ([(noSrcSpan, SymTable M.empty)]) . unLoc) $ bagToList (typecheckedSource t))]) []) ((concat $ shallowest cast (last $ bagToList (typecheckedSource t))) :: [HsExpr GhcTc])
       

@@ -32,7 +32,7 @@ import Data.Map.Strict ( unionWith, unionsWith, insert, singleton, empty, fromLi
 import Control.Applicative ( liftA2 )
 
 import Ra ( pat_match )
-import Ra.Lang ( Stack(..), SymApp(..), Sym(..), SymTable(..), PatMatchSyms(..), StackBranch(..), unSB, mapSB, union_sym_tables, stack_loc, make_stack_key )
+import Ra.Lang ( Stack(..), SymApp(..), Sym(..), SymTable(..), PatMatchSyms(..), StackBranch(..), unSB, mapSB, union_sym_tables, make_stack_key )
 import Ra.Extra
 
 unHsWrap :: LHsExpr GhcTc -> LHsExpr GhcTc
@@ -65,11 +65,9 @@ bind_to_table stack b = case b of
   -------------------
   FunBind { fun_id = L _ fun_id, fun_matches } -> mempty {
       pms_syms = singleton fun_id [ SA {
+          sa_stack = stack,
           sa_consumers = mempty,
-          sa_sym = Sym {
-              expr = noLoc $ HsLam NoExt fun_matches,
-              stack_loc = make_stack_key stack
-            },
+          sa_sym = noLoc $ HsLam NoExt fun_matches,
           sa_args = []
         } ]
     }
@@ -82,7 +80,7 @@ bind_to_table stack b = case b of
             st_branch = mapSB (update_head (second (union_sym_tables . (:[next_explicit_binds])))) (st_branch stack)
           }
         next_exprs = grhs_exprs pat_rhs
-        next_pms = mconcat $ catMaybes $ map (pat_match stack' pat_lhs . flip (SA []) [] . Sym (make_stack_key stack)) next_exprs -- TODO confirm that making a fresh stack key here is the right thing to do
+        next_pms = mconcat $ catMaybes $ map (pat_match pat_lhs . flip (SA [] stack') []) next_exprs -- TODO confirm that making a fresh stack key here is the right thing to do
     in pms { pms_syms = mempty } <> next_pms
   VarBind{} -> mempty
   _ -> error $ constr_ppr b
@@ -96,7 +94,7 @@ grhs_binds stack = fromMaybe mempty . everythingBut (<>) (
     (Nothing, False)
     `mkQ` ((,True) . Just . bind_to_table stack)
     `extQ` ((,False) . ((\case
-        BindStmt _ (L _ pat) expr _ _ -> pat_match stack pat (SA [] (Sym (make_stack_key stack) expr) []) -- TODO check if a fresh stack key here is the right thing to do
+        BindStmt _ (L _ pat) expr _ _ -> pat_match pat (SA [] stack expr []) -- TODO check if a fresh stack key here is the right thing to do
         _ -> Nothing
         ) . unLoc :: LStmt GhcTc (LHsExpr GhcTc) -> Maybe PatMatchSyms)) -- TODO dangerous: should we really keep looking deeper after finding a BindStmt?
     `extQ` ((Nothing,) . ((\case 

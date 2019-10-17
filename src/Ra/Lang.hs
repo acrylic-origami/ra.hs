@@ -14,6 +14,7 @@ module Ra.Lang (
   make_thread_key,
   union_sym_tables,
   update_head_table,
+  append_frame,
   ReduceSyms(..),
   PatMatchSyms(..),
   append_pms_writes,
@@ -26,11 +27,8 @@ module Ra.Lang (
   ReduceStateMachine(..),
   is_parent,
   is_zeroth_kind,
-  to_expr,
-  expr_map,
   runIO_expr
 ) where
-
 
 import GHC
 import Var ( varName, varType )
@@ -60,33 +58,19 @@ import Ra.Extra ( update_head, zipAll )
 
 -- Note about making SymTables from bindings: `Fun` needs to be lifted to `HsExpr` through the `HsLam` constructor. This is to unify the type of the binding to `HsExpr` while retaining MatchGroup which is necessary at HsApp on a named function.
 
--- class Symbol s where
---   mksym :: HsExpr GhcTc -> s
---   unsym :: s -> HsExpr GhcTc -- this seems really unidiomatic
+type Sym = LHsExpr GhcTc
+-- instance Eq Sym where
+--   (Sym loc1 _) == (Sym loc2 _) = loc1 == loc2
+-- instance Ord Sym where
+--   (Sym loc1 _) <= (Sym loc2 _) = loc1 <= loc2
 
--- instance Symbol Sym where
---   mksym = id
---   unsym = id
-
--- instance ReduceSyms 
-
-data Sym = Sym {
-  stack_loc :: StackKey,
-  expr :: LHsExpr GhcTc
-}
-instance Eq Sym where
-  (Sym loc1 _) == (Sym loc2 _) = loc1 == loc2
-instance Ord Sym where
-  (Sym loc1 _) <= (Sym loc2 _) = loc1 <= loc2
-
-expr_map :: (LHsExpr GhcTc -> LHsExpr GhcTc) -> Sym -> Sym
-expr_map f sym = sym {
-    expr = f $ expr sym
-  }
+-- expr_map :: (LHsExpr GhcTc -> LHsExpr GhcTc) -> Sym -> Sym
+-- expr_map f sym = sym {
+--     expr = f $ expr sym
+--   }
   
 type SymTable = Map Id [SymApp] -- the list is of a symbol table for partial function apps, and the expression.
 union_sym_tables = unionsWith (++)
--- ah crap, lambdas. these only apply to IIFEs, but still a pain.
 
 type StackKey = [SrcSpan]
 data ThreadKey = TKNormal StackKey | TKEnemy -- ThreadKey is specialized so only the stack above the latest forkIO call is included
@@ -107,6 +91,7 @@ type Pipe = StackKey -- LHsExpr GhcTc
 
 data SymApp = SA {
   sa_consumers :: [StackKey],
+  sa_stack :: Stack,
     -- laws for `consumers`:
     -- 1. if a term is consumed and decomposed or part of an unknown/partial application, the whole term is consumed under the same consumer[s]
     -- 2. if a term goes through multiple consumers, they're all tracked for races individually
@@ -115,8 +100,7 @@ data SymApp = SA {
 } -- 2D tree. Too bad we can't use Tree; the semantics are totally different
 data Hold = Hold {
   h_pat :: Pat GhcTc,
-  h_sym :: SymApp,
-  h_stack :: Stack
+  h_sym :: SymApp
 }
 
 data PatMatchSyms = PatMatchSyms {
@@ -213,15 +197,12 @@ instance Monoid ReduceStateMachine where
   mappend = (<>)
   
 is_zeroth_kind :: Sym -> Bool
-is_zeroth_kind sym = case unLoc $ expr sym of
+is_zeroth_kind sym = case unLoc sym of
   HsLit _ _ -> True
   HsOverLit _ _ -> True
   ExplicitTuple _ _ _ -> True
   ExplicitList _ _ _ -> True
   _ -> False
-
-to_expr :: Sym -> HsExpr GhcTc
-to_expr = unLoc . expr
 
 make_thread_key :: Stack -> ThreadKey
 make_thread_key stack = TKNormal $
@@ -256,6 +237,11 @@ clear_branch = SB . map (second (const empty)) . unSB
 update_head_table :: SymTable -> Stack -> Stack
 update_head_table next_table st = st {
   st_branch = SB $ update_head (second (uncurry (<>) . (,next_table))) $ unSB $ st_branch st
+}
+
+append_frame :: (SrcSpan, SymTable) -> Stack -> Stack
+append_frame frame stack = stack {
+  st_branch = SB (frame : (coerce $ st_branch stack))
 }
 
 union_branches :: [StackBranch] -> StackBranch
