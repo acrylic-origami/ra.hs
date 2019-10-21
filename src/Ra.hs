@@ -44,14 +44,6 @@ import Ra.Lang
 import Ra.Extra
 import Ra.Refs ( write_funs, read_funs )
 
--- type NFStackTable = Map GhcTc NF
--- data NF = WHNF (HsExpr GhcTc) | Ref (HsExpr GhcTc)
--- WHNF is either a literal, data construction, or unknown function app;
--- Ref holds the expression that spits out the pipe that holds the value[s] that we must trace in a separate traversal over ref types. Note the Located because we use SrcSpan to find specific write instances
-
--- app :: Sym -> [Sym] -> Sym
--- app = foldl (curry $ Sym False mempty . noLoc . uncurry (HsApp undefined) . both (coerce)) -- one downside is the noLoc on the app, but all the actual exprs are located
-
 pat_multi_match ::
   [Pat GhcTc]
   -> [[SymApp]]
@@ -60,7 +52,6 @@ pat_multi_match pats args =
   let matches = map (uncurry ((mconcat.) . map . pat_match)) (zip pats args)
   in foldl1 (<>) matches
 
--- invoke as: `unions . concatMap (map ((unions . concatMap . pat_match table) . unLoc) . zip args . m_pats) mg_alts` on `MatchGroup`'s `mg_alts`
 pat_match ::
   Pat GhcTc
   -> SymApp
@@ -113,10 +104,13 @@ pat_match pat sa =
       pat_match' sa' = case pat of
         TuplePat _ pats _ ->
           let matcher (SA _ _ _ (x:_)) = error "Argument on explicit tuple. Perhaps a tuple section, which isn't supported yet."
-              matcher (SA _ _ sym' _) = case unLoc sym' of
+              matcher sa'' = case unLoc $ sa_sym sa'' of
                 ExplicitTuple _ args'' _ ->
                   pat_multi_match (map unLoc pats) $ map ((\case
-                      Present _ expr' -> [SA [] (sa_stack sa') expr' []] -- NB encodes the assumption that we should preserve the original location of creation for this object, rather than this unravelling point because the datatype decompositions are trivial and can't define an object's identity
+                      Present _ expr -> [sa'' {
+                        sa_sym = expr,
+                        sa_args = []
+                      }] -- NOTE this is the distributivity of `consumers` onto subdata of a datatype, as well as the stack -- NOTE encodes the assumption that we should preserve the original location of creation for this object, rather than this unravelling point because the datatype decompositions are trivial and can't define an object's identity
                       Missing _ -> error "Tuple sections aren't supported yet."
                     ) . unLoc) args''
                 _ -> Nothing
@@ -125,9 +119,12 @@ pat_match pat sa =
           
         ConPatOut{ pat_con = L _ (RealDataCon pat_con'), pat_args = d_pat_args } -> case d_pat_args of
           PrefixCon pats ->
-            let matcher (SA consumers' stack' sym' args') | (L _ (HsConLikeOut _ (RealDataCon con)), args'') <- deapp sym' -- sym' is in NF thanks to pat_multi_match; this assumes it
+            let matcher sa'' | (L _ (HsConLikeOut _ (RealDataCon con)), args'') <- deapp $ sa_sym sa'' -- sym' is in NF thanks to pat_multi_match; this assumes it
                                                    , dataConName con == dataConName pat_con' -- TEMP disable name matching on constructor patterns, to allow symbols to always be bound to everything
-                                                    = let flat_args = ((map (\arg'' -> [SA [] (sa_stack sa') arg'' []]) args'') ++ args') -- TODO check if this stack is correct
+                                                    = let flat_args = ((map (\arg'' -> [sa'' {
+                                                      sa_sym = arg'',
+                                                      sa_args = []
+                                                    }]) args'') ++ sa_args sa'') -- NOTE this is the distributivity of `consumers` onto subdata of a datatype, as well as the stack -- TODO check if this stack is correct
                                                       in pat_multi_match (map unLoc pats) flat_args
                                                    | otherwise = Nothing
                 next_pms' = mconcat $ map matcher (rs_syms nf_syms)
