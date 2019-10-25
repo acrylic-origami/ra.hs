@@ -50,7 +50,7 @@ module Rahse (
     in map ((flip App) args
   cov_ids HsApp l r = l_app l $ [cov_ids $ unLoc r] where
     l_app :: HsExpr GhcTc -> [[ReturnThing]] -> [ReturnThing]
-    l_app expr@(HsApp _ _) = l_app expr . (cov_ids r):
+    l_app expr@(HsApp _ _) = l_app (cov_ids r):
     l_app expr args = cov_ids expr & map $ \l_ret -> case l_ret of
       App { rt_left, rt_args } -> App rt_left (rt_args ++ args)
       _ -> App l_ret args
