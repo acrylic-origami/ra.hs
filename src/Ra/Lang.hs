@@ -1,17 +1,18 @@
-{-# LANGUAGE TupleSections, DeriveFunctor, UndecidableInstances #-}
+{-# LANGUAGE TupleSections, DeriveFunctor, LambdaCase, NamedFieldPuns #-}
 module Ra.Lang (
   Sym(..),
   SymTable(..),
   StackBranch(..),
   StackKey,
   ThreadKey(..),
+  StackFrame(..),
   unSB,
   mapSB,
   Stack(..),
   stack_var_lookup,
-  is_visited,
   make_stack_key,
   make_thread_key,
+  var_ref_tail,
   union_sym_tables,
   update_head_table,
   append_frame,
@@ -19,6 +20,7 @@ module Ra.Lang (
   PatMatchSyms(..),
   append_pms_writes,
   append_rs_writes,
+  pms2rs,
   SymApp(..),
   Write(..),
   Writes(..),
@@ -26,6 +28,7 @@ module Ra.Lang (
   Pipe,
   ReduceStateMachine(..),
   is_parent,
+  is_visited,
   is_zeroth_kind,
   runIO_expr
 ) where
@@ -98,6 +101,13 @@ data SymApp = SA {
   sa_sym :: Sym,
   sa_args :: [[SymApp]]
 } -- 2D tree. Too bad we can't use Tree; the semantics are totally different
+
+instance Eq SymApp where
+  (==) = curry $ uncurry (&&) . (
+      uncurry (==) . both sa_stack
+      &&& uncurry (==) . both sa_args
+    )
+
 data Hold = Hold {
   h_pat :: Pat GhcTc,
   h_sym :: SymApp
@@ -128,25 +138,47 @@ append_rs_writes ws rs = rs {
 append_pms_writes ws pms = pms {
   pms_writes = unionWith (++) (pms_writes pms) ws
 }
+pms2rs pms = ReduceSyms {
+  rs_syms = concat $ elems $ pms_syms pms,
+  rs_holds = pms_holds pms,
+  rs_writes = pms_writes pms
+}
 
-newtype StackBranch = SB [(SrcSpan, SymTable)] -- nodes: consecutive ones are child-parent
+data StackFrame = VarRefFrame Id | AppFrame {
+  af_raw :: SymApp, -- for anti-cycle purposes
+  af_syms :: SymTable
+}
+-- BOOKMARK: Stack needs to be oufitted with the graph of bindings that refer to each other, in case a hold resolves and a new pattern match works.
+
+newtype StackBranch = SB [StackFrame] -- TODO flatten this to type alias -- nodes: consecutive ones are child-parent
 unSB (SB v) = v
 mapSB f = SB . f . unSB
+  
+-- instance Ord StackBranch where
+--   (<=) = (curry $ uncurry (<=) . both (map fst . unSB))
 
 instance Eq StackBranch where
-  (==) = (curry $ uncurry (==) . both (map fst . unSB))
-  
-instance Ord StackBranch where
-  (<=) = (curry $ uncurry (<=) . both (map fst . unSB))
+  (==) = curry $ uncurry (&&) . (
+      uncurry (==) . both length
+      &&& all (uncurry pred) . uncurry zip
+    ) . both unSB where
+    pred (AppFrame { af_raw = l }) (AppFrame { af_raw = r }) = l == r
+    pred (VarRefFrame l) (VarRefFrame r) = l == r
+    pred _ _ = False
 
-data Stack = Stack {
-  st_branch :: StackBranch,
-  st_threads :: [Int]
-}
+is_parent p q = SB (take (length (unSB q)) (unSB p)) == q
+
+is_visited :: StackBranch -> SymApp -> Bool
+is_visited sb sa = any (\case
+    AppFrame { af_raw } -> af_raw == sa
+    _ -> False
+  ) (unSB sb)
 
 instance Semigroup StackBranch where
   (<>) =
-    let combine (Just (a_src, a_table)) (Just b@(b_src, b_table)) = assert (a_src == b_src) (second (union_sym_tables . (:[a_table])) b) -- prefer first (accumulating) branch
+    let combine (Just a) (Just b) = assert (af_raw a == af_raw b) (a {
+            af_syms = (union_sym_tables [af_syms a, af_syms b])
+          }) -- prefer first (accumulating) branch
         combine Nothing (Just b) = b
         combine (Just a) Nothing = a
     in curry $ SB . map (uncurry combine) . uncurry zipAll . both unSB
@@ -155,12 +187,20 @@ instance Monoid StackBranch where
   mempty = SB mempty
   mappend = (<>)
 
-instance Semigroup Stack where
-  (Stack b_l t_l) <> (Stack b_r t_r) = Stack (b_l <> b_r) (t_l <> t_r)
+data Stack = Stack {
+  st_branch :: StackBranch,
+  st_thread :: (StackBranch, StackBranch) -- stack of forkIO and stack of thing being forked resp.; this pair is unique if the anti-cycle works properly
+}
 
-instance Monoid Stack where
-  mempty = Stack mempty mempty
-  mappend = (<>)
+instance Eq Stack where
+  l == r = st_branch l == st_branch r -- disregard thread for anti-cycle purposes
+
+-- instance Semigroup Stack where
+--   (Stack b_l t_l) <> (Stack b_r t_r) = Stack (b_l <> b_r) (t_l <> t_r)
+
+-- instance Monoid Stack where
+--   mempty = Stack mempty mempty
+--   mappend = (<>)
 
 instance Semigroup ReduceSyms where
   (ReduceSyms lsyms lholds lwrites) <> (ReduceSyms rsyms rholds rwrites) = ReduceSyms (lsyms <> rsyms) (lholds <> rholds) (unionWith (++) lwrites rwrites) -- is there a nicer way to do this?
@@ -205,41 +245,40 @@ is_zeroth_kind sym = case unLoc sym of
   _ -> False
 
 make_thread_key :: Stack -> ThreadKey
-make_thread_key stack = TKNormal $
-  if not $ null $ st_threads stack
-    then drop ((length $ unSB $ st_branch stack) - (head $ st_threads stack)) $ make_stack_key stack
-    else mempty
+make_thread_key stack = undefined {- TKNormal $
+  if not $ null $ st_thread stack
+    then drop ((length $ unSB $ st_branch stack) - (head $ st_thread stack)) $ make_stack_key stack
+    else mempty -}
 
 make_stack_key :: Stack -> StackKey
-make_stack_key = map fst . unSB . st_branch
+make_stack_key = map (\case
+    AppFrame { af_raw } -> getLoc $ sa_sym af_raw
+  ) . unSB . st_branch -- map fst . unSB . st_branch
+
+-- var_ref_tail used for the law that var resolution cycles only apply to the tail
+var_ref_tail :: Stack -> [Id]
+var_ref_tail = var_ref_tail' . unSB . st_branch where
+  var_ref_tail' ((VarRefFrame v):rest) = v:(var_ref_tail' rest)
+  var_ref_tail' _ = []
 
 stack_var_lookup :: Bool -> Id -> Stack -> Maybe [SymApp]
 stack_var_lookup soft v = branch_var_lookup soft v . st_branch
 
 branch_var_lookup :: Bool -> Id -> StackBranch -> Maybe [SymApp]
-branch_var_lookup soft v = foldr ((\t -> (<|>(pick t))) . snd) Nothing . unSB  -- for some reason, `coerce` doesn't want to work here from some ambiguity that I can't understand
-  where pick = if soft
-          then listToMaybe . elems . filterWithKey (const . uncurry (&&) . ((==(varName v)) . varName &&& (eqType (varType v)) . varType))
-          else (!?v)
-
-is_visited :: Stack -> SrcSpan -> Bool
-is_visited = flip elem . map fst . unSB . st_branch
-
-is_parent :: StackBranch -> StackBranch -> Bool
-is_parent = curry $ uncurry (&&) . (
-    uncurry (<) . both length
-    &&& and . map (uncurry (==) . both fst) . uncurry zip
-  ) . both unSB
-
-clear_branch :: StackBranch -> StackBranch
-clear_branch = SB . map (second (const empty)) . unSB
+branch_var_lookup soft v = foldr (\case
+    AppFrame { af_syms } -> (<|>(pick af_syms))
+    _ -> id
+  ) Nothing . unSB where
+    pick = if soft
+      then listToMaybe . elems . filterWithKey (const . uncurry (&&) . ((==(varName v)) . varName &&& (eqType (varType v)) . varType))
+      else (!?v)
 
 update_head_table :: SymTable -> Stack -> Stack
-update_head_table next_table st = st {
+update_head_table next_table st = undefined {- st {
   st_branch = SB $ update_head (second (uncurry (<>) . (,next_table))) $ unSB $ st_branch st
-}
+} -}
 
-append_frame :: (SrcSpan, SymTable) -> Stack -> Stack
+append_frame :: StackFrame -> Stack -> Stack
 append_frame frame stack = stack {
   st_branch = SB (frame : (coerce $ st_branch stack))
 }

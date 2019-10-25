@@ -1,4 +1,4 @@
-{-# LANGUAGE Rank2Types #-}
+{-# LANGUAGE Rank2Types, LambdaCase, NamedFieldPuns #-}
 
 module Ra.Lang.Extra (
   ppr_sa,
@@ -8,10 +8,11 @@ module Ra.Lang.Extra (
 ) where
 
 import GHC ( LHsExpr, GhcTc )
+import Data.List ( intersperse )
 import Data.Bool ( bool )
 import Data.Tuple.Extra ( (&&&), (***) )
 
-import Ra.Lang ( SymApp(..), Sym(..), unSB, Stack(..), ReduceSyms(..), PatMatchSyms(..), Hold(..), Write(..), Writes )
+import Ra.Lang
 
 import Outputable ( Outputable(..), showPpr )
 import Data.Map.Strict ( assocs )
@@ -62,4 +63,16 @@ ppr_pms show' = flip concatMap printers . (("\n===\n"++).) . flip ($) where
     ]
 
 ppr_stack :: Printer -> Stack -> String
-ppr_stack show' = show . map (map (uncurry (++) . ((++"->") . show' *** concatMap (ppr_sa show'))) . M.assocs . snd) . unSB . st_branch
+ppr_stack show' =
+  show . map (\case
+      AppFrame { af_syms, af_raw } ->
+        ppr_sa show' af_raw
+        ++ ", "
+        ++ (show $ map (
+            uncurry ((++) . (++" -> ")) . (
+                show'
+                *** concat . intersperse "\n" . map (ppr_sa show')
+              )
+          ) (M.assocs af_syms))
+      VarRefFrame v -> show' v
+    ) . unSB . st_branch
