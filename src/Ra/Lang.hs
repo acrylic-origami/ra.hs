@@ -53,7 +53,7 @@ import qualified Data.Map.Strict as M ( map )
 import Data.Set ( Set(..) )
 import Data.Semigroup ( Semigroup(..), (<>) )
 import Data.Monoid ( Monoid(..), mempty, mconcat )
-import Data.Maybe ( listToMaybe )
+import Data.Maybe ( listToMaybe, catMaybes )
 import Control.Applicative ( (<|>) )
 import Control.Exception ( assert )
 
@@ -103,10 +103,13 @@ data SymApp = SA {
 } -- 2D tree. Too bad we can't use Tree; the semantics are totally different
 
 instance Eq SymApp where
-  (==) = curry $ uncurry (&&) . (
-      uncurry (==) . both sa_stack
-      &&& uncurry (==) . both sa_args
-    )
+  (==) = curry $ flip all preds . flip ($) where
+    preds = [
+        uncurry (==) . both sa_args,
+        uncurry (==) . both (st_branch . sa_stack),
+        uncurry (==) . both (getLoc . sa_sym)
+      ]
+    
 
 data Hold = Hold {
   h_pat :: Pat GhcTc,
@@ -162,11 +165,12 @@ instance Eq StackBranch where
       uncurry (==) . both length
       &&& all (uncurry pred) . uncurry zip
     ) . both unSB where
-    pred (AppFrame { af_raw = l }) (AppFrame { af_raw = r }) = l == r
+    pred (AppFrame { af_raw = l }) (AppFrame { af_raw = r }) = (getLoc $ sa_sym l) == (getLoc $ sa_sym r) -- don't push the equality recursion any further
     pred (VarRefFrame l) (VarRefFrame r) = l == r
     pred _ _ = False
 
-is_parent p q = SB (take (length (unSB q)) (unSB p)) == q
+is_parent = undefined
+-- is_parent p q = SB (take (length (unSB q)) (unSB p)) == q
 
 is_visited :: StackBranch -> SymApp -> Bool
 is_visited sb sa = any (\case
@@ -192,8 +196,8 @@ data Stack = Stack {
   st_thread :: (StackBranch, StackBranch) -- stack of forkIO and stack of thing being forked resp.; this pair is unique if the anti-cycle works properly
 }
 
-instance Eq Stack where
-  l == r = st_branch l == st_branch r -- disregard thread for anti-cycle purposes
+-- instance Eq Stack where
+--   l == r = st_branch l == st_branch r -- disregard thread for anti-cycle purposes
 
 -- instance Semigroup Stack where
 --   (Stack b_l t_l) <> (Stack b_r t_r) = Stack (b_l <> b_r) (t_l <> t_r)
@@ -251,8 +255,9 @@ make_thread_key stack = undefined {- TKNormal $
     else mempty -}
 
 make_stack_key :: Stack -> StackKey
-make_stack_key = map (\case
-    AppFrame { af_raw } -> getLoc $ sa_sym af_raw
+make_stack_key = catMaybes . map (\case
+    AppFrame { af_raw } -> Just $ getLoc $ sa_sym af_raw
+    VarRefFrame _ -> Nothing
   ) . unSB . st_branch -- map fst . unSB . st_branch
 
 -- var_ref_tail used for the law that var resolution cycles only apply to the tail

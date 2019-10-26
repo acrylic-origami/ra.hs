@@ -217,65 +217,63 @@ reduce_deep sa@(SA consumers stack sym args) =
   -------------------
   -- SYM BASE CASE --
   -------------------
-  let terminal =
-        let args' = map (map reduce_deep) args -- [[ ([SymApp], Writes) ]], to become ([[SymApp]], Writes)
-            extract :: Monoid a => (ReduceSyms -> a) -> [a]
-            extract f = map (mconcat . map f) args'
-        in mempty {
-          rs_syms = [sa { sa_args = extract rs_syms }],
-          rs_writes = mconcat $ extract rs_writes
-        } -- NOTE the detachment of sym from write. Hopefully that isn't eventually an issue.
+  let terminal = mempty { rs_syms = [sa] }
       
       unravel1 :: LHsExpr GhcTc -> [[LHsExpr GhcTc]] -> ReduceSyms -- peeling back wrappings; consider refactor to evaluate most convenient type to put here
-      unravel1 target new_args = reduce_deep sa {
+      unravel1 target new_args =
+        let nf_new_args_syms = map (map (\arg -> reduce_deep $ sa {
+                sa_sym = arg,
+                sa_args = []
+              })) new_args
+        in (mconcat $ mconcat nf_new_args_syms) {
+          rs_syms = mempty
+        } <> reduce_deep sa {
           -- STACK good: inherit from ambient application; if this ends up being an application, reduce_deep will update the stack accordingly
           -- CONSUMERS good: consumed law that distributes over unwrapping
           sa_sym = target,
-          sa_args = map (map (\arg -> sa {
-              sa_sym = arg,
-              sa_args = []
-            })) new_args ++ args
+          sa_args = map (concatMap rs_syms) nf_new_args_syms
           -- CONSUMERS good: `consumers` property at least distributes over App; if the leftmost var is of type `Consumer`, then it might make some args `consumed` as well.
         }
       
       fail = error $ "FAIL" ++ (constr_ppr $ sym)
   in case unLoc sym of
-    HsLamCase _ mg -> unravel1 (HsLam undefined mg <$ sym) []
+    HsLamCase _ mg -> unravel1 (HsLam NoExt mg <$ sym) []
     
     HsLam _ mg | let loc = getLoc $ mg_alts mg -- <- NB this is why the locations of MatchGroups don't matter
                , not $ is_visited (st_branch stack) sa -> -- beware about `noLoc`s showing up here: maybe instead break out the pattern matching code
-      if matchGroupArity mg > length args
-        then terminal
-        else
-          let pat_matches =
-                (unLoc $ mg_alts mg) & mconcat . mconcat . map ( -- over function body alternatives
-                  map ( -- over arguments
-                    mconcat . catMaybes . map ( -- over possible expressions
-                      uncurry (flip pat_match) -- share the same stack
-                    ) . (uncurry zip) . (id *** repeat)
-                  ) . zip (sa_args sa) . map unLoc . m_pats . unLoc -- `args` FINALLY USED HERE
-                ) -- NOTE no recursive pattern matching needed here because argument patterns are purely deconstructive and can't refer to the new bindings the others make
-              
-              bind_pms@(PatMatchSyms {
-                  pms_syms = next_explicit_binds,
-                  pms_holds = holds,
-                  pms_writes = bind_writes
-                }) = grhs_binds (append_frame (AppFrame sa mempty) stack) mg -- STACK questionable: do we need the new symbol here? Shouldn't it be  -- localize binds correctly via pushing next stack location
-              next_exprs = grhs_exprs $ map (grhssGRHSs . m_grhss . unLoc) $ unLoc $ mg_alts mg
-              next_frame = AppFrame sa (union_sym_tables [pms_syms pat_matches, next_explicit_binds])
-              next_stack = append_frame next_frame stack
-              next_args = drop (matchGroupArity mg) args
-          in mempty {
-            rs_writes = pms_writes bind_pms <> pms_writes pat_matches,
-            rs_holds = pms_holds bind_pms <> pms_holds pat_matches
-          }
-            <> (mconcat $ map (\next_expr ->
-                reduce_deep sa {
-                  sa_stack = next_stack,
-                  sa_sym = next_expr,
-                  sa_args = next_args
-                }
-              ) next_exprs) -- TODO check if the sym record update + args are correct for this stage
+                if matchGroupArity mg > length args
+                  then terminal
+                  else
+                    let pat_matches =
+                          (unLoc $ mg_alts mg) & mconcat . mconcat . map ( -- over function body alternatives
+                            map ( -- over arguments
+                              mconcat . catMaybes . map ( -- over possible expressions
+                                uncurry (flip pat_match) -- share the same stack
+                              ) . (uncurry zip) . (id *** repeat)
+                            ) . zip (sa_args sa) . map unLoc . m_pats . unLoc -- `args` FINALLY USED HERE
+                          ) -- NOTE no recursive pattern matching needed here because argument patterns are purely deconstructive and can't refer to the new bindings the others make
+                        
+                        bind_pms@(PatMatchSyms {
+                            pms_syms = next_explicit_binds,
+                            pms_holds = holds,
+                            pms_writes = bind_writes
+                          }) = grhs_binds (append_frame (AppFrame sa mempty) stack) mg -- STACK questionable: do we need the new symbol here? Shouldn't it be  -- localize binds correctly via pushing next stack location
+                        next_exprs = grhs_exprs $ map (grhssGRHSs . m_grhss . unLoc) $ unLoc $ mg_alts mg
+                        next_frame = AppFrame sa (union_sym_tables [pms_syms pat_matches, next_explicit_binds])
+                        next_stack = append_frame next_frame stack
+                        next_args = drop (matchGroupArity mg) args
+                    in mempty {
+                      rs_writes = pms_writes bind_pms <> pms_writes pat_matches,
+                      rs_holds = pms_holds bind_pms <> pms_holds pat_matches
+                    }
+                      <> (mconcat $ map (\next_expr ->
+                          reduce_deep sa {
+                            sa_stack = next_stack,
+                            sa_sym = next_expr,
+                            sa_args = next_args
+                          }
+                        ) next_exprs) -- TODO check if the sym record update + args are correct for this stage
+               | otherwise -> mempty
           
     HsVar _ (L loc v) ->
       let args' | arg1:rest <- args
@@ -297,7 +295,7 @@ reduce_deep sa@(SA consumers stack sym args) =
            | Just left_syms <- stack_var_lookup True v stack -> -- this absolutely sucks, we have to use the "soft" search because instance name Uniques are totally unusable. Can't even use `Name`, unless I convert to string every time... which I might need to do in the future for performance reasons if I can't come up with a solution for this. 
             mconcat $ map (\sa' ->
                 reduce_deep sa' {
-                  sa_args = sa_args sa' ++ args',
+                  sa_args = sa_args sa' ++ args', -- ARGS good: elements in the stack are already processed, so if their args are okay these ones are okay
                   sa_stack = (sa_stack sa') {
                     st_branch = mapSB ((VarRefFrame v):) (st_branch (sa_stack sa'))
                   }
@@ -370,18 +368,19 @@ reduce_deep sa@(SA consumers stack sym args) =
     NegApp _ v _ -> unravel1 v []
     HsPar _ v -> unravel1 v []
     SectionL _ v m_op -> unravel1 m_op [[v]]
-    SectionR _ m_op v ->
-      let L _ (HsVar _ op) = unHsWrap m_op
-      in case stack_var_lookup True (unLoc op) stack of
-        Just branch_exprs -> mconcat $ map (\sa' ->
-            reduce_deep $ SA {
-              sa_consumers = [],
-              sa_stack = sa_stack sa,
-              sa_sym = (\(HsLam x mg) -> HsLam x (mg_flip mg)) <$> (sa_sym sa'),
-              sa_args = [[sa { sa_sym = v }]] ++ (sa_args sa') ++ args -- TODO also do the operator constructor case -- TODO check that `sym` record update is the right thing to do here
-            }
-          ) branch_exprs
-        Nothing -> terminal
+    SectionR _ m_op v | length args > 0 -> -- need to check fo arguments because that's the only way we're going to enforce the flipping
+                        let L _ (HsVar _ op) = unHsWrap m_op
+                            nf_arg1_syms = reduce_deep sa { sa_sym = v, sa_args = [] }
+                            arg0:args_rest = args
+                        in case stack_var_lookup True (unLoc op) stack of
+                          Just branch_exprs ->
+                            mappend nf_arg1_syms { rs_syms = [] } $ mconcat $ map (\sa' ->
+                              reduce_deep $ sa' {
+                                sa_args = (sa_args sa') ++ (arg0 : (rs_syms nf_arg1_syms) : args_rest) -- TODO also do the operator constructor case
+                              }
+                            ) branch_exprs
+                          Nothing -> terminal
+                      | otherwise -> error "Unsaturated (i.e. partial) SectionR is not yet supported."
         
     HsCase _ x mg -> unravel1 (noLoc $ HsApp NoExt (HsLam NoExt mg <$ mg_alts mg) x) [] -- refactor as HsLam so we can just use that pat match code
     HsIf _ _ if_ then_ else_ -> unravel1 then_ [] <> unravel1 else_ []
@@ -421,42 +420,4 @@ reduce_deep sa@(SA consumers stack sym args) =
     ExplicitSum _ _ _ _ -> terminal
     ExplicitList _ _ _ -> terminal
     -- ExplicitPArr _ _ -> terminal
-    _ -> error ("Incomplete coverage of HsExpr rules: encountered " ++ (show $ toConstr sym))
-
--- type Violation = (StackKey, StackKey)
--- linkIO :: Writes -> [Violation] -- consumer-pipe violated pairs
--- linkIO ws = concat $ elems $ mapWithKey (\p w -> map (,p) (pred w (lookup_deep mempty p))) ws where
---   pred :: [Write] -> [Write] -> [StackKey] -- consumers with a conflict on these writes
---   pred (normal:rest_normals) enemies =
---     pred rest_normals enemies
---     ++ concatMap (intersect (sa_consumers $ snd normal) . sa_consumers . snd) enemies
---     ++ (concatMap (\normal' ->
---         if fst normal /= fst normal'
---           then (sa_consumers $ snd normal) `intersect` (sa_consumers $ snd normal')
---           else []
---       ) rest_normals)
---   pred [] (enemy:rest_enemies) = -- TODO verify not overlapping with "normal" runs due to traisitivty
---     pred [] rest_enemies
---     ++ concatMap (intersect (sa_consumers $ snd enemy) . sa_consumers . snd) rest_enemies
---   pred [] [] = []
-    
---   lookup_deep :: Set Pipe -> Pipe -> [Write] -- new writes on this pipe: these have "enemy" thread semantics
---   lookup_deep visited p | not $ S.member p visited =
---     let dig_write :: SymApp -> [Write]
---         dig_write sa = -- resolve new writes from this write (if this write is composed of reads)
---           if | HsVar _ v <- unLoc $ sa_sym sa
---              , (varString $ unLoc v) == "readMVar"
---              , (length $ sa_args sa) >= 1
---                -> concatMap dig_metapipe (head $ sa_args sa) -- head of args should be the pipe
---              | otherwise -> []
-        
---         dig_metapipe :: SymApp -> [Pipe]
---         dig_metapipe sa =
---           let syms = case unLoc $ sa_sym sa of
---                       HsVar _ v' -> case (varString $ unLoc v') of
---                         "newMVar" -> ws ! (stack_loc $ sa_sym sa) -- TODO verify stack_loc always coincides with the logged location of the pipe
---                         "readMVar" -> map (sa_sym . snd) $ lookup_deep (S.insert p visited) sa -- resolve meta-pipe; don't worry about discarding the thread info from the write, as this pipe as a _value_ will be handled in another iteration through the Writes table
---                         _ -> [] -- expect the only things to arrive at a 
---           in concatMap (map (fmap (\sa' -> sa' { sa_args = (sa_args sa') ++ (tail $ sa_args sa) }))) syms
---     in concatMap dig_write (ws ! p)
---   lookup_deep _ _ = []
+    _ -> error ("Incomplete coverage of HsExpr rules: encountered " ++ (show $ toConstr $ unLoc sym))
