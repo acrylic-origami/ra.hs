@@ -24,12 +24,6 @@ module Main where
 
   import Outputable ( Outputable, interppSP, showSDocUnsafe, showPpr )
   
-  ppr_branch :: StackBranch -> String
-  ppr_branch = foldr (\case
-      AppFrame sa syms -> flip (foldr ((++) . (++"\n\n") . uncurry (++) . (((++", ") . ppr_unsafe) *** concatMap (ppr_unsafe . sa_sym)))) (M.assocs $ stbl_table syms) . (++"---\n\n")
-      _ -> id
-    ) "" . unSB
-
   main :: IO ()
   main = do
     mod_str:_ <- getArgs

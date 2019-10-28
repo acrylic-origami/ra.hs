@@ -130,7 +130,7 @@ pat_match_one pat sa =
           
         _ -> error $ constr_ppr pat
         
-pat_match :: Binds -> PatMatchSyms
+pat_match :: [Bind] -> PatMatchSyms
 pat_match binds = 
   let sub :: SymTable -> SymApp -> ReduceSyms
       sub t sa =
@@ -145,7 +145,7 @@ pat_match binds =
                   (
                       mconcat
                       . map (uncurry (lift_rs_syms2 list_alt))
-                      . map (sub t &&& (\sa' -> mempty { rs_syms = [sa'] }))
+                      . map (sub t &&& reduce_deep)
                       . map (\sa' ->
                           sa' {
                             sa_stack = append_frame (VarRefFrame v) (sa_stack sa'),
@@ -156,15 +156,15 @@ pat_match binds =
                   <$> ((stbl_table t) !? v)
                 else Nothing
               _ -> Just Nothing
-        in fromMaybe mempty (fromMaybe (
-            if args_changed
-              then mempty { rs_syms = [sa { sa_args = next_args }] }
-              else mempty -- encode the law that if all arguments have failed and the sym has also failed, this whole match fails
-          ) <$> m_next_syms) -- encode the law that if this is a var reduction cycle, then the result is empty
+            in fromMaybe mempty (fromMaybe (
+                if args_changed
+                  then mempty { rs_syms = [sa { sa_args = next_args }] } -- `sa` is NF by assumption
+                  else mempty -- encode the law that if all arguments have failed and the sym has also failed, this whole match fails
+              ) <$> m_next_syms) -- encode the law that if this is a var reduction cycle, then the result is empty
       
       -- BOOKMARK need reduce_deep here, maybe strip away from pat_match for performance later
       
-      iterant :: Binds -> PatMatchSyms -> (Bool, (Binds, PatMatchSyms))
+      iterant :: [Bind] -> PatMatchSyms -> (Bool, ([Bind], PatMatchSyms))
       iterant binds' pms =
         let next_pms = fromMaybe mempty $ mconcat $ map (mconcat . uncurry map . (pat_match_one *** rs_syms)) binds'
             m_next_syms = map (map (sub (pms_syms next_pms)) . rs_syms) (map snd binds') -- [[ReduceSyms]]
@@ -179,7 +179,7 @@ pat_match binds =
             not changed,
             (
                 next_syms,
-                (pms <> next_pms)
+                next_pms -- prefer new sym matches because it's purely progressive
               ) -- {
             -- pms_syms = pms_syms next_pms `map_alt` pms_syms pms -- pms_syms: why only take the left hand side if it exists? It's almost like the bindings might be repeated, but substitution clearly makes a lasting change. 
               -- ah, except in the last case, where there are no changes, but we slap all the successes into the body anyways. 
@@ -206,20 +206,19 @@ reduce syms0 =
                           = [sa {
                              sa_args = next_args
                            }]
-            to_expand = case unLoc $ sa_sym sa of
+            expanded = case unLoc $ sa_sym sa of
               HsVar _ v -> case varString $ unLoc v of
-                "newEmptyMVar" -> [sa]
+                "newEmptyMVar" -> fromMaybe mempty (map w_sym <$> ws !? make_stack_key sa)
                 "readMVar" | length next_args > 0 -> head next_args -- list of pipes from the first arg
                 _ -> []
               _ -> []
-            expanded = concat $ concatMap (maybeToList . fmap (map w_sym) . (ws!?) . make_stack_key . sa_stack) $ to_expand
         in ((args_rs { rs_syms = mempty })<>) $ mconcat $ map reduce_deep $ (`list_alt` next_argd_sym) $ expanded -- a bunch of null handling
         -- STACK good: relies on the pipe stack being correct
           
       
       iterant :: ReduceSyms -> (Bool, ReduceSyms)
       iterant rs =
-        let (next_pms, next_rs) = (mconcat *** mconcat) $ unzip $ map (\sa ->
+        let (next_pms, next_rs) = (mconcat *** mconcat) $ unzip $ map (\sa -> -- expand reads in the stack of all symbols in the reduce_syms
                 let (next_pms', next_branch) = second SB $ unzip $ map (\case
                         af@(AppFrame { af_syms }) ->
                           let next_binds = map (second (mconcat . map (expand_reads (rs_writes rs)) . rs_syms)) (stbl_binds af_syms)
@@ -229,7 +228,7 @@ reduce syms0 =
                             })
                         v -> (mempty, v)
                       ) (unSB $ st_branch $ sa_stack sa)
-                in (mconcat next_pms', expand_reads (rs_writes rs) $ sa {
+                in (mconcat next_pms', expand_reads (rs_writes rs) $ sa { -- `Writes x StackFrame` product happens here
                   sa_stack = (sa_stack sa) {
                     st_branch = next_branch
                   }
@@ -310,7 +309,7 @@ reduce_deep sa@(SA consumers stack sym args) =
     HsVar _ (L loc v) ->
       let args' | arg1:rest <- args
                 , Just "Consumer" <- varTyConName v
-                  = (map (\b -> b { sa_consumers = make_stack_key stack : (sa_consumers b) }) arg1) : rest -- identify as consumer-consumed values
+                  = (map (\b -> b { sa_consumers = make_stack_key sa : (sa_consumers b) }) arg1) : rest -- identify as consumer-consumed values
                    -- TODO refactor with lenses
                 | otherwise = args
       in (\rs@(ReduceSyms { rs_syms }) -> -- enforce nesting rule: all invokations on consumed values are consumed
@@ -373,18 +372,13 @@ reduce_deep sa@(SA consumers stack sym args) =
                   
             "putMVar" -> if length args' >= 2
               then
-                let (pipes:vals:_) = args'
-                in terminal {
-                    rs_writes = unionWith (++) (rs_writes terminal) (unionsWith (++) [
-                        singleton (make_stack_key $ sa_stack pipe) [
-                            Write {
-                              w_stack = stack,
-                              w_sym = val
-                            }
-                          ]
-                        | pipe <- pipes
-                        , val <- vals
-                      ])
+                let (pipes:vals:_) = sa_args sa -- args' -- BOOKMARK args' and sa/terminal are incomparable: we lose the `consumed` property this way
+                    next_writes = map (\pipe -> case unLoc $ sa_sym pipe of
+                        HsVar _ v | varString (unLoc v) == "newEmptyMVar" -> singleton (make_stack_key pipe) $ map (\val -> Write stack val) vals
+                        _ -> mempty
+                      ) pipes
+                in terminal { -- this is a bit silly atm since terminal writes are empty, but not necessarily all the time
+                    rs_writes = unionsWith (++) (rs_writes terminal : next_writes)
                   }
               else terminal
               

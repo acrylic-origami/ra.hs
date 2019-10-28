@@ -26,7 +26,7 @@ module Ra.Lang (
   Writes(..),
   Hold(..),
   Pipe,
-  Binds,
+  Bind,
   ReduceStateMachine(..),
   is_parent,
   is_visited,
@@ -73,10 +73,10 @@ type Sym = LHsExpr GhcTc
 --     expr = f $ expr sym
 --   }
   
-type Binds = [(Pat GhcTc, ReduceSyms)]
+type Bind = (Pat GhcTc, ReduceSyms)
 data SymTable = SymTable {
   stbl_table :: Map Id [SymApp], -- strictly speaking, binds => table always, but it's so expensive both performance-wise and in code, so memoization does something good here
-  stbl_binds :: Binds
+  stbl_binds :: [Bind]
 }
 
 instance Semigroup SymTable where
@@ -268,11 +268,14 @@ make_thread_key stack = undefined {- TKNormal $
     then drop ((length $ unSB $ st_branch stack) - (head $ st_thread stack)) $ make_stack_key stack
     else mempty -}
 
-make_stack_key :: Stack -> StackKey
-make_stack_key = catMaybes . map (\case
-    AppFrame { af_raw } -> Just $ getLoc $ sa_sym af_raw
-    VarRefFrame _ -> Nothing
-  ) . unSB . st_branch -- map fst . unSB . st_branch
+make_stack_key :: SymApp -> StackKey
+make_stack_key = uncurry (:) . (
+    getLoc . sa_sym
+    &&& catMaybes . map (\case
+        AppFrame { af_raw } -> Just $ getLoc $ sa_sym af_raw
+        VarRefFrame _ -> Nothing
+      ) . unSB . st_branch . sa_stack -- map fst . unSB . st_branch
+  )
 
 -- var_ref_tail used for the law that var resolution cycles only apply to the tail
 var_ref_tail :: Stack -> [Id]

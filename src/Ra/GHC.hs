@@ -1,6 +1,5 @@
 {-# LANGUAGE Rank2Types, ScopedTypeVariables, LambdaCase, TupleSections, NamedFieldPuns #-}
 module Ra.GHC (
-  Binds,
   deapp,
   unHsWrap,
   grhs_exprs,
@@ -48,7 +47,7 @@ deapp expr =
     HsApp _ l r -> (id *** (++[r])) (deapp l)
     _ -> (unwrapped, [])
 
-bind_to_table :: Stack -> HsBind GhcTc -> Binds
+bind_to_table :: Stack -> HsBind GhcTc -> [Bind]
 bind_to_table st b = case b of
   AbsBinds { abs_exports, abs_binds } ->
     let subbinds = mconcat $ bagToList $ mapBag (bind_to_table st . unLoc) abs_binds
@@ -86,14 +85,14 @@ bind_to_table st b = case b of
 grhs_exprs :: GenericQ [LHsExpr GhcTc]
 grhs_exprs x = map (\(L _ (GRHS _ _ body) :: LGRHS GhcTc (LHsExpr GhcTc)) -> body) (concat $ shallowest cast x)
 
-grhs_binds :: Stack -> GenericQ Binds -- TODO consider passing more info via `GenericQ (Maybe PatMatchSyms)`, and removing the fromMaybe
+grhs_binds :: Stack -> GenericQ [Bind] -- TODO consider passing more info via `GenericQ (Maybe PatMatchSyms)`, and removing the fromMaybe
 grhs_binds st = everythingBut (<>) (
     (mempty, False)
     `mkQ` ((,True) . bind_to_table st)
     `extQ` ((,False) . ((\case
         BindStmt _ (L _ pat) expr _ _ -> [(pat, reduce_deep (SA [] st expr []))]
         _ -> mempty
-      ) . unLoc :: LStmt GhcTc (LHsExpr GhcTc) -> Binds)) -- TODO dangerous: should we really keep looking deeper after finding a BindStmt?
+      ) . unLoc :: LStmt GhcTc (LHsExpr GhcTc) -> [Bind])) -- TODO dangerous: should we really keep looking deeper after finding a BindStmt?
     `extQ` ((mempty,) . ((\case 
       HsApp _ _ _ -> True
       HsLam _ _ -> True

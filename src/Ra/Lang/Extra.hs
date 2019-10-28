@@ -5,7 +5,8 @@ module Ra.Lang.Extra (
   ppr_sa,
   ppr_rs,
   ppr_pms,
-  ppr_stack
+  ppr_stack,
+  ppr_branch
 ) where
 
 import GHC ( LHsExpr, GhcTc )
@@ -39,7 +40,7 @@ ppr_sa show' = go 0 where
                       . (("\n" ++ indent ++ " (\n")++)
                       . concatMap (go (n+1))
                     ) . sa_args
-                  &&& show' . make_stack_key . sa_stack
+                  &&& show' . make_stack_key
                 )
             )
           )
@@ -78,6 +79,12 @@ ppr_stack show' =
           ) (M.assocs $ stbl_table af_syms))
       VarRefFrame v -> show' v
     ) . unSB . st_branch
+
+ppr_branch :: Printer -> StackBranch -> String
+ppr_branch show' = foldr (\case
+    AppFrame sa syms -> flip (foldr ((++) . (++"\n\n") . uncurry (++) . (((++", ") . show') *** concatMap (show' . sa_sym)))) (M.assocs $ stbl_table syms) . (++"---\n\n")
+    _ -> id
+  ) "" . unSB
 
 ppr_unsafe :: Outputable a => a -> String
 ppr_unsafe = showSDocUnsafe . interppSP . pure
