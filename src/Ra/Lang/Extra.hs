@@ -1,6 +1,7 @@
 {-# LANGUAGE Rank2Types, LambdaCase, NamedFieldPuns #-}
 
 module Ra.Lang.Extra (
+  ppr_unsafe,
   ppr_sa,
   ppr_rs,
   ppr_pms,
@@ -14,7 +15,7 @@ import Data.Tuple.Extra ( (&&&), (***) )
 
 import Ra.Lang
 
-import Outputable ( Outputable(..), showPpr )
+import Outputable ( Outputable(..), showPpr, interppSP, showSDocUnsafe )
 import Data.Map.Strict ( assocs )
 import qualified Data.Map.Strict as M ( map, elems, assocs )
 
@@ -32,11 +33,14 @@ ppr_sa show' = go 0 where
                   bool "" "*" . not . null . sa_consumers
                   &&& ((indent ++ "<")++) . (show' . sa_sym)
                 )
-              &&& concatMap (
-                  (++("\n" ++ indent ++ " ]\n"))
-                  . (("\n" ++ indent ++ " [\n")++)
-                  . concatMap (go (n+1))
-                ) . sa_args
+              &&& uncurry (++) . (
+                  ("*"++) . (++"*") . concatMap (
+                      (++("\n" ++ indent ++ " )\n"))
+                      . (("\n" ++ indent ++ " (\n")++)
+                      . concatMap (go (n+1))
+                    ) . sa_args
+                  &&& show' . make_stack_key . sa_stack
+                )
             )
           )
 
@@ -51,15 +55,13 @@ ppr_rs show' = flip concatMap printers . (("\n===\n"++).) . flip ($) where
   printers = [
       concatMap ((++"\n") . ppr_sa show') . rs_syms
       , ppr_writes show' . rs_writes
-      , concatMap ((++"\n---\n") . ppr_hold show') . rs_holds
     ]
 
 ppr_pms :: Printer -> PatMatchSyms -> String
 ppr_pms show' = flip concatMap printers . (("\n===\n"++).) . flip ($) where
   printers = [
-      concatMap ((++"\n") . uncurry ((++) . (++" -> ")) . (show' *** concatMap ((++"\n") . ppr_sa show'))) . assocs . pms_syms
+      concatMap ((++"\n") . uncurry ((++) . (++" -> ")) . (show' *** concatMap ((++"\n") . ppr_sa show'))) . assocs . stbl_table . pms_syms
       , ppr_writes show' . pms_writes
-      , concatMap ((++"\n---\n") . ppr_hold show') . pms_holds
     ]
 
 ppr_stack :: Printer -> Stack -> String
@@ -73,6 +75,9 @@ ppr_stack show' =
                 show'
                 *** concat . intersperse "\n" . map (ppr_sa show')
               )
-          ) (M.assocs af_syms))
+          ) (M.assocs $ stbl_table af_syms))
       VarRefFrame v -> show' v
     ) . unSB . st_branch
+
+ppr_unsafe :: Outputable a => a -> String
+ppr_unsafe = showSDocUnsafe . interppSP . pure

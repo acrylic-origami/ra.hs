@@ -13,7 +13,6 @@ module Ra.Lang (
   make_stack_key,
   make_thread_key,
   var_ref_tail,
-  union_sym_tables,
   update_head_table,
   append_frame,
   ReduceSyms(..),
@@ -21,11 +20,13 @@ module Ra.Lang (
   append_pms_writes,
   append_rs_writes,
   pms2rs,
+  lift_rs_syms2,
   SymApp(..),
   Write(..),
   Writes(..),
   Hold(..),
   Pipe,
+  Binds,
   ReduceStateMachine(..),
   is_parent,
   is_visited,
@@ -72,8 +73,18 @@ type Sym = LHsExpr GhcTc
 --     expr = f $ expr sym
 --   }
   
-type SymTable = Map Id [SymApp] -- the list is of a symbol table for partial function apps, and the expression.
-union_sym_tables = unionsWith (++)
+type Binds = [(Pat GhcTc, ReduceSyms)]
+data SymTable = SymTable {
+  stbl_table :: Map Id [SymApp], -- strictly speaking, binds => table always, but it's so expensive both performance-wise and in code, so memoization does something good here
+  stbl_binds :: Binds
+}
+
+instance Semigroup SymTable where
+  (SymTable ltbl lbinds) <> (SymTable rtbl rbinds) = SymTable (unionWith (++) ltbl rtbl) (lbinds <> rbinds)
+
+instance Monoid SymTable where
+  mempty = SymTable mempty mempty
+  mappend = (<>)
 
 type StackKey = [SrcSpan]
 data ThreadKey = TKNormal StackKey | TKEnemy -- ThreadKey is specialized so only the stack above the latest forkIO call is included
@@ -118,13 +129,16 @@ data Hold = Hold {
 
 data PatMatchSyms = PatMatchSyms {
   pms_syms :: SymTable,
-  pms_holds :: [Hold],
   pms_writes :: Writes
 }
 data ReduceSyms = ReduceSyms {
   rs_syms :: [SymApp],
-  rs_holds :: [Hold],
   rs_writes :: Writes
+}
+
+lift_rs_syms2 :: ([SymApp] -> [SymApp] -> [SymApp]) -> ReduceSyms -> ReduceSyms -> ReduceSyms
+lift_rs_syms2 f a b = (a <> b) {
+  rs_syms = f (rs_syms a) (rs_syms b)
 }
 
 -- data Syms t = Syms {
@@ -142,8 +156,7 @@ append_pms_writes ws pms = pms {
   pms_writes = unionWith (++) (pms_writes pms) ws
 }
 pms2rs pms = ReduceSyms {
-  rs_syms = concat $ elems $ pms_syms pms,
-  rs_holds = pms_holds pms,
+  rs_syms = concat $ elems $ stbl_table $ pms_syms pms,
   rs_writes = pms_writes pms
 }
 
@@ -151,6 +164,7 @@ data StackFrame = VarRefFrame Id | AppFrame {
   af_raw :: SymApp, -- for anti-cycle purposes
   af_syms :: SymTable
 }
+
 -- BOOKMARK: Stack needs to be oufitted with the graph of bindings that refer to each other, in case a hold resolves and a new pattern match works.
 
 newtype StackBranch = SB [StackFrame] -- TODO flatten this to type alias -- nodes: consecutive ones are child-parent
@@ -181,7 +195,7 @@ is_visited sb sa = any (\case
 instance Semigroup StackBranch where
   (<>) =
     let combine (Just a) (Just b) = assert (af_raw a == af_raw b) (a {
-            af_syms = (union_sym_tables [af_syms a, af_syms b])
+            af_syms = (af_syms a <> af_syms b)
           }) -- prefer first (accumulating) branch
         combine Nothing (Just b) = b
         combine (Just a) Nothing = a
@@ -207,27 +221,27 @@ data Stack = Stack {
 --   mappend = (<>)
 
 instance Semigroup ReduceSyms where
-  (ReduceSyms lsyms lholds lwrites) <> (ReduceSyms rsyms rholds rwrites) = ReduceSyms (lsyms <> rsyms) (lholds <> rholds) (unionWith (++) lwrites rwrites) -- is there a nicer way to do this?
+  (ReduceSyms lsyms lwrites) <> (ReduceSyms rsyms  rwrites) = ReduceSyms (lsyms <> rsyms) (unionWith (++) lwrites rwrites) -- is there a nicer way to do this?
   
   -- vs. (<>) = curry $ uncurry ReduceSyms . ((uncurry (++) . fmap rs_syms) &&& (uncurry (unionWith (++)) . fmap ss_syms))
 
 instance Monoid ReduceSyms where
-  mempty = ReduceSyms mempty mempty mempty
+  mempty = ReduceSyms mempty mempty
   mappend = (<>)
 
 
 instance Semigroup PatMatchSyms where
-  (PatMatchSyms lsyms lholds lwrites) <> (PatMatchSyms rsyms rholds rwrites) = PatMatchSyms (unionWith (++) lsyms rsyms) (lholds <> rholds) (unionWith (++) lwrites rwrites)
+  (PatMatchSyms lsyms lwrites) <> (PatMatchSyms rsyms rwrites) = PatMatchSyms (lsyms <> rsyms) (unionWith (++) lwrites rwrites)
   
 instance Monoid PatMatchSyms where
-  mempty = PatMatchSyms mempty mempty mempty
+  mempty = PatMatchSyms mempty mempty
   mappend = (<>)
   
 data ReduceStateMachine = RSM {
   -- rs_writes :: Set StackKey,
   -- rs_holds :: Set StackKey,
   rsm_stacks :: [Stack], -- extra bit of state for memoization and to enable stop condition
-  rsm_syms :: (ReduceSyms, ReduceSyms) -- the magic hat we're pulling all the rabbits out of; a 2-stack for new and old (resp.), so that we can have a halt condition based on the number of new writes (when the left is a subset of the right, we're done)
+  rsm_syms :: ReduceSyms -- the magic hat we're pulling all the rabbits out of; a 2-stack for new and old (resp.), so that we can have a halt condition based on the number of new writes (when the left is a subset of the right, we're done)
 }
 
 instance Semigroup ReduceStateMachine where
@@ -271,7 +285,7 @@ stack_var_lookup soft v = branch_var_lookup soft v . st_branch
 
 branch_var_lookup :: Bool -> Id -> StackBranch -> Maybe [SymApp]
 branch_var_lookup soft v = foldr (\case
-    AppFrame { af_syms } -> (<|>(pick af_syms))
+    AppFrame { af_syms } -> (<|>(pick $ stbl_table af_syms))
     _ -> id
   ) Nothing . unSB where
     pick = if soft

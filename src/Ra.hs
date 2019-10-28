@@ -18,6 +18,7 @@ import Var ( mkLocalVar ) -- for WildPat synthesis
 import IdInfo ( vanillaIdInfo, IdDetails(VanillaId) ) -- for WildPat synthesis
 
 import Data.List ( elemIndex )
+import Data.Bool ( bool )
 import Data.Coerce ( coerce )
 import Data.Char ( isLower )
 import Data.Tuple ( swap )
@@ -42,6 +43,7 @@ import qualified Ra.Refs as Refs
 import {-# SOURCE #-} Ra.GHC
 import Ra.Lang
 import Ra.Extra
+import Ra.Lang.Extra
 import Ra.Refs ( write_funs, read_funs )
 
 pat_multi_match ::
@@ -49,14 +51,14 @@ pat_multi_match ::
   -> [[SymApp]]
   -> Maybe PatMatchSyms
 pat_multi_match pats args =
-  let matches = map (uncurry ((mconcat.) . map . pat_match)) (zip pats args)
+  let matches = map (uncurry ((mconcat.) . map . pat_match_one)) (zip pats args)
   in foldl1 (<>) matches
 
-pat_match ::
+pat_match_one ::
   Pat GhcTc
   -> SymApp
   -> Maybe PatMatchSyms
-pat_match pat sa =
+pat_match_one pat sa =
   let nf_syms = reduce_deep sa
   in case pat of
     ---------------------------------
@@ -65,45 +67,36 @@ pat_match pat sa =
     WildPat ty -> Just $ mempty { pms_writes = rs_writes nf_syms } -- TODO check if this is the right [write, haha] behavior
       
     -- Wrappers --
-    LazyPat _ (L _ pat) -> pat_match pat sa
-    ParPat _ (L _ pat) -> pat_match pat sa
-    BangPat _ (L _ pat) -> pat_match pat sa
-    -- SigPatOut (L _ pat) _ -> pat_match pat sa
+    LazyPat _ (L _ pat) -> pat_match_one pat sa
+    ParPat _ (L _ pat) -> pat_match_one pat sa
+    BangPat _ (L _ pat) -> pat_match_one pat sa
+    -- SigPatOut (L _ pat) _ -> pat_match_one pat sa
     
     -- Bases --
     VarPat _ (L _ v) -> Just $ mempty {
-        pms_syms = singleton v (rs_syms nf_syms),
+        pms_syms = mempty { stbl_table = singleton v (rs_syms nf_syms) },
         pms_writes = rs_writes nf_syms
       }
     LitPat _ _ -> Just mempty -- no new name bindings
     NPat _ _ _ _ -> Just mempty
     
     -- Containers --
-    ListPat _ pats -> mconcat $ map (\(L _ pat') -> pat_match pat' sa) pats -- encodes the logic that all elements of a list might be part of the pattern regardless of order
+    ListPat _ pats -> mconcat $ map (\(L _ pat') -> pat_match_one pat' sa) pats -- encodes the logic that all elements of a list might be part of the pattern regardless of order
     AsPat _ (L _ bound) (L _ pat') -> -- error "At patterns (@) aren't yet supported."
-      let matches = pat_match pat' sa
-      in (mappend (mempty { pms_syms = singleton bound [sa] })) <$> matches -- note: `at` patterns can't be formally supported, because they might contain sub-patterns that need to hold. They also violate the invariant that "held" pattern targets have a read operation on their surface. However, since this only makes the test _less sensitive_, we'll try as hard as we can and just miss some things later.
+      let matches = pat_match_one pat' sa
+      in (mappend (mempty { pms_syms = mempty { stbl_table = singleton bound [sa] } })) <$> matches -- note: `at` patterns can't be formally supported, because they might contain sub-patterns that need to hold. They also violate the invariant that "held" pattern targets have a read operation on their surface. However, since this only makes the test _less sensitive_, we'll try as hard as we can and just miss some things later.
         -- TODO test this: the outer binding and inner pattern are related: the inner pattern must succeed for the outer one to as well.
         
     -------------------------------
     -- *** MATCHING PATTERNS *** --
     -------------------------------
     _ -> fmap (\pms -> pms { -- TODO consider generic joining function
-      pms_writes = pms_writes pms <> rs_writes nf_syms,
-      pms_holds = pms_holds pms <> rs_holds nf_syms
+      pms_writes = pms_writes pms <> rs_writes nf_syms
     }) next_pms where
       next_pms = mconcat $ map pat_match' (rs_syms nf_syms)
-      pat_match' sa' | HsVar _ v  <- unLoc $ sa_sym sa'
-                    , "readMVar" == (varString $ unLoc v)
-                    = Just $ mempty { -- TODO sketchy making this a "hit" when it's not yet matched
-                        pms_holds = pure $ Hold {
-                            h_pat = pat,
-                            h_sym = sa' -- STACK good: only used to continue reduction later in `reduce`
-                          }
-                      }
       pat_match' sa' = case pat of
         TuplePat _ pats _ ->
-          let matcher (SA _ _ _ (x:_)) = error "Argument on explicit tuple. Perhaps a tuple section, which isn't supported yet."
+          let matcher (SA _ _ _ (x:_)) = mempty -- error $ "Argument on explicit tuple. Perhaps a tuple section, which isn't supported yet. PPR:\n" ++ (ppr_sa ppr_unsafe sa')
               matcher sa'' = case unLoc $ sa_sym sa'' of
                 ExplicitTuple _ args'' _ ->
                   pat_multi_match (map unLoc pats) $ map ((\case
@@ -136,78 +129,119 @@ pat_match pat sa =
           RecCon _ -> error "Record syntax yet to be implemented"
           
         _ -> error $ constr_ppr pat
-
-reduce :: ReduceSyms -> ReduceSyms -- SymTable for ambient declarations
-reduce syms0 =
-  let expand_reads :: Writes -> SymApp -> [SymApp]
-      expand_reads ws sa | HsVar _ v <- unLoc $ sa_sym sa
-                         = concat $ concatMap (maybeToList . fmap (map w_sym) . (ws!?) . make_stack_key . sa_stack) $ -- a bunch of null handling
-                          -- STACK good: relies on the pipe stack being correct
-                          case varString $ unLoc v of -- return all pipes
-                            "newMVar" -> [sa]
-                            "readMVar" -> (concatMap (expand_reads ws) (head $ sa_args sa)) -- list of pipes from the first arg
-                            _ -> []
-                         | otherwise = [sa]
+        
+pat_match :: Binds -> PatMatchSyms
+pat_match binds = 
+  let sub :: SymTable -> SymApp -> ReduceSyms
+      sub t sa =
+        let m_next_args = map (map (sub t)) (sa_args sa)
+            args_changed = any (any (not . null . rs_syms)) m_next_args
+            next_args = map (concatMap (uncurry list_alt . (rs_syms *** pure)) . uncurry zip) (zip m_next_args (sa_args sa)) -- encode law that arguments can fail to reduce and just fall back to the original form
+            -- same number of first bits, should be same number of second bits so `zip` shouldn't fail
+            m_next_syms :: Maybe (Maybe ReduceSyms)
+            m_next_syms = case unLoc $ sa_sym sa of
+              HsVar _ (L _ v) -> if not $ v `elem` (var_ref_tail $ sa_stack sa)
+                then Just $
+                  (
+                      mconcat
+                      . map (uncurry (lift_rs_syms2 list_alt))
+                      . map (sub t &&& (\sa' -> mempty { rs_syms = [sa'] }))
+                      . map (\sa' ->
+                          sa' {
+                            sa_stack = append_frame (VarRefFrame v) (sa_stack sa'),
+                            sa_args = (sa_args sa') <> next_args
+                          }
+                        )
+                    )
+                  <$> ((stbl_table t) !? v)
+                else Nothing
+              _ -> Just Nothing
+        in fromMaybe mempty (fromMaybe (
+            if args_changed
+              then mempty { rs_syms = [sa { sa_args = next_args }] }
+              else mempty -- encode the law that if all arguments have failed and the sym has also failed, this whole match fails
+          ) <$> m_next_syms) -- encode the law that if this is a var reduction cycle, then the result is empty
       
-      -- BOOKMARK break at terminal and 
+      -- BOOKMARK need reduce_deep here, maybe strip away from pat_match for performance later
       
-      -- expand_writes :: Syms a -> Writes SymApp -- BOOKMARK: ADD VISITED SET!!!
-      -- -- for every pipe, make a set of terminal symbols written from different threads, updating the threads to be enemies -- this is so that we can pat-match knowing these are as terminal as we can get them; then expect pattern matching to screen out the duds (mostly unresolved functions, especially writes) -- IMPORTANT POINT: DON'T COMMIT THE OUTPUT TO MEMORY: we're going to re-expand every pipe every time
-      -- expand_writes ss = M.map (concatMap ((expand_reads (rs_writes ss)) . w_sym) (rs_writes ss))
-      
-      expand_hold :: Writes -> Hold -> [PatMatchSyms]
-      expand_hold ws h = catMaybes $ map (pat_match (h_pat h)) (expand_reads ws (h_sym h))
-      
-      left_outer_writes :: Writes -> Writes -> Writes
-      left_outer_writes l r =
-        let (l_lookups, r_lookups) = both (M.map (map (make_stack_key . sa_stack . w_sym &&& id))) (l, r) -- STACK good: used to identify unique writes; assumes `reduce` breaks cycles correctly
-        in foldrWithKey (\k v m ->
-            let r_lookup = r_lookups ! k
-                l_lookup = l_lookups ! k
-                next_writes =
-                  if not $ M.member k r
-                    then v
-                    else concatMap (\(k', v') ->
-                        concat $ maybeToList $ ([] <$ lookup k' r_lookup) <|> Just [v'] -- if it doesn't exist, add it
-                      ) l_lookup
-            in if not $ null next_writes
-              then M.insert k next_writes m
-              else m
-          ) mempty l
-      
-      -- to_writeset :: Writes -> Set (Pipe, StackKey)
-      -- to_writeset = S.fromList . concatMap (uncurry $ map . (,)) . map (second (map (stack_loc . sa_sym))) . assocs -- big assumption with `stack_loc` as the unique key for the sym
-      -- from_writeset :: Set (Pipe, StackKey) -> Writes
-      -- from_writeset = -- BOOKMARK: Writes -> Writes -> Writes (take the unique writes from the left side: should be more straightforward manually re: loop over all keys and find the ones that don't exist in rhs, or elems that don't exist)
-      
-      iterant :: ReduceStateMachine -> (Bool, ReduceStateMachine)
-      iterant rs =
-        let next_writes = uncurry left_outer_writes $ both rs_writes (rsm_syms rs)
-            next_hold_expands = map (id &&& expand_hold next_writes) (rs_holds $ fst $ rsm_syms rs)
-            next_stacks = map (\(h, pmss) -> update_head_table (unionsWith (++) $ map pms_syms pmss) (sa_stack $ h_sym h)) next_hold_expands -- STACK questionable: assumes the symbols being at the first frame is a sufficiently correct place/substitution
-            -- also note that this leads to stack inconsistency, although i guess it also shows that the ReduceSym stacks aren't gospel thanks to holds
-            -- NB this doesn't suffice to halt the iteration because it's still a map over a populated list; we can't avoid computation, since the stacks coming out of here will be non-empty
-            make_syms w st | is_parent (st_branch st) (st_branch $ w_stack w)
-                           = reduce_deep (w_sym w) -- STACK dependent: 
-                           | otherwise = mempty
-            -- next_syms = mconcat $ M.map (concatMap (rs_writes)) 
-            
-            next_syms = mconcat [
-                make_syms w st |
-                st <- next_stacks,
-                w <- concat $ elems $ rs_writes $ fst $ rsm_syms rs
-              ]
+      iterant :: Binds -> PatMatchSyms -> (Bool, (Binds, PatMatchSyms))
+      iterant binds' pms =
+        let next_pms = fromMaybe mempty $ mconcat $ map (mconcat . uncurry map . (pat_match_one *** rs_syms)) binds'
+            m_next_syms = map (map (sub (pms_syms next_pms)) . rs_syms) (map snd binds') -- [[ReduceSyms]]
+            changed = any (any (not . null . rs_syms)) m_next_syms
+            next_syms = map
+              (\(next_rss, (prev_pat, prev_rs)) ->
+                  (prev_pat, (prev_rs <> mconcat next_rss) {
+                      rs_syms = concatMap (uncurry list_alt . (rs_syms *** pure)) (zip next_rss (rs_syms prev_rs))
+                    })
+                ) (zip m_next_syms binds') -- [([ReduceSyms], (Pat, ReduceSyms))]
         in (
-            M.null next_writes && (null $ concatMap snd next_hold_expands),
-            RSM {
-              rsm_stacks = next_stacks,
-              rsm_syms = (next_syms, uncurry (<>) $ rsm_syms rs)
-            }
-          )
-      res = until (fst . snd) (((+1) *** iterant . snd)) (0, (False, mempty {
-        rsm_syms = (syms0, mempty)
-      }))
-  in snd $ rsm_syms $ snd $ snd res
+            not changed,
+            (
+                next_syms,
+                (pms <> next_pms)
+              ) -- {
+            -- pms_syms = pms_syms next_pms `map_alt` pms_syms pms -- pms_syms: why only take the left hand side if it exists? It's almost like the bindings might be repeated, but substitution clearly makes a lasting change. 
+              -- ah, except in the last case, where there are no changes, but we slap all the successes into the body anyways. 
+          -- }
+          ) -- look for if `<>` is the right thing to do on this pms chain
+      syms0 = mconcat $ map snd binds
+      (bindsn, symsn) = snd $ until fst (uncurry iterant . snd) (False, (binds, mempty))
+  in symsn {
+      pms_syms = (pms_syms symsn) {
+        stbl_binds = bindsn
+      },
+      pms_writes = pms_writes symsn <> rs_writes syms0
+    }
+
+reduce :: ReduceSyms -> (Int, ReduceSyms)
+reduce syms0 =
+  let expand_reads :: Writes -> SymApp -> ReduceSyms
+      expand_reads ws sa =
+        let (args_rs, next_args) = first (mconcat) $ unzip $ map ((mconcat *** concat) . unzip . (map $ \sa' ->
+                (id &&& (`list_alt` [sa']) . rs_syms) $ expand_reads ws sa'
+              )) (sa_args sa)
+            next_argd_sym -- | all null next_args = []
+                          -- | otherwise =
+                          = [sa {
+                             sa_args = next_args
+                           }]
+            to_expand = case unLoc $ sa_sym sa of
+              HsVar _ v -> case varString $ unLoc v of
+                "newEmptyMVar" -> [sa]
+                "readMVar" | length next_args > 0 -> head next_args -- list of pipes from the first arg
+                _ -> []
+              _ -> []
+            expanded = concat $ concatMap (maybeToList . fmap (map w_sym) . (ws!?) . make_stack_key . sa_stack) $ to_expand
+        in ((args_rs { rs_syms = mempty })<>) $ mconcat $ map reduce_deep $ (`list_alt` next_argd_sym) $ expanded -- a bunch of null handling
+        -- STACK good: relies on the pipe stack being correct
+          
+      
+      iterant :: ReduceSyms -> (Bool, ReduceSyms)
+      iterant rs =
+        let (next_pms, next_rs) = (mconcat *** mconcat) $ unzip $ map (\sa ->
+                let (next_pms', next_branch) = second SB $ unzip $ map (\case
+                        af@(AppFrame { af_syms }) ->
+                          let next_binds = map (second (mconcat . map (expand_reads (rs_writes rs)) . rs_syms)) (stbl_binds af_syms)
+                              next_pms'' = pat_match next_binds
+                          in (next_pms'', af {
+                              af_syms = pms_syms next_pms''
+                            })
+                        v -> (mempty, v)
+                      ) (unSB $ st_branch $ sa_stack sa)
+                in (mconcat next_pms', expand_reads (rs_writes rs) $ sa {
+                  sa_stack = (sa_stack sa) {
+                    st_branch = next_branch
+                  }
+                })
+              ) $ rs_syms rs
+            next_writes = (rs_writes next_rs) <> (pms_writes next_pms)
+        in (M.null next_writes, next_rs {
+            rs_writes = next_writes
+          })
+        
+      res = until (fst . snd) (((+1) *** iterant . snd)) (0, (False, syms0))
+  in (fst res, snd $ snd res)
 
 reduce_deep :: SymApp -> ReduceSyms
 reduce_deep sa | let args = sa_args sa
@@ -248,23 +282,21 @@ reduce_deep sa@(SA consumers stack sym args) =
                           (unLoc $ mg_alts mg) & mconcat . mconcat . map ( -- over function body alternatives
                             map ( -- over arguments
                               mconcat . catMaybes . map ( -- over possible expressions
-                                uncurry (flip pat_match) -- share the same stack
+                                uncurry (flip pat_match_one) -- share the same stack
                               ) . (uncurry zip) . (id *** repeat)
                             ) . zip (sa_args sa) . map unLoc . m_pats . unLoc -- `args` FINALLY USED HERE
                           ) -- NOTE no recursive pattern matching needed here because argument patterns are purely deconstructive and can't refer to the new bindings the others make
                         
                         bind_pms@(PatMatchSyms {
                             pms_syms = next_explicit_binds,
-                            pms_holds = holds,
                             pms_writes = bind_writes
-                          }) = grhs_binds (append_frame (AppFrame sa mempty) stack) mg -- STACK questionable: do we need the new symbol here? Shouldn't it be  -- localize binds correctly via pushing next stack location
+                          }) = pat_match $ grhs_binds (append_frame (AppFrame sa mempty) stack) mg -- STACK questionable: do we need the new symbol here? Shouldn't it be  -- localize binds correctly via pushing next stack location
                         next_exprs = grhs_exprs $ map (grhssGRHSs . m_grhss . unLoc) $ unLoc $ mg_alts mg
-                        next_frame = AppFrame sa (union_sym_tables [pms_syms pat_matches, next_explicit_binds])
+                        next_frame = AppFrame sa (pms_syms pat_matches <> next_explicit_binds)
                         next_stack = append_frame next_frame stack
                         next_args = drop (matchGroupArity mg) args
                     in mempty {
-                      rs_writes = pms_writes bind_pms <> pms_writes pat_matches,
-                      rs_holds = pms_holds bind_pms <> pms_holds pat_matches
+                      rs_writes = pms_writes bind_pms <> pms_writes pat_matches
                     }
                       <> (mconcat $ map (\next_expr ->
                           reduce_deep sa {
@@ -313,7 +345,8 @@ reduce_deep sa@(SA consumers stack sym args) =
             --   else terminal
             
             -- MAGIC MONADS (fallthrough)
-            "return" | vs:args'' <- args' -> mconcat $ map (\sa' -> reduce_deep sa' { sa_args = args'' }) vs
+            "return" | vs:args'' <- args' ->
+              mconcat $ map (\sa' -> reduce_deep $ sa' { sa_args = ((sa_args sa') <> args'') }) vs
             -- NB about `[]` on the rightmost side of the pattern match on `args'`: it's never typesafe to apply to a monad (except `Arrow`), so if we see arguments, we have to freak out and not move forward with that.
               
             ">>" | i:o:[] <- args'
@@ -387,11 +420,10 @@ reduce_deep sa@(SA consumers stack sym args) =
     HsMultiIf ty rhss ->
       let PatMatchSyms {
               pms_syms = next_explicit_binds,
-              pms_holds = holds,
               pms_writes = bind_writes
-            } = grhs_binds stack rhss
+            } = pat_match $ grhs_binds stack rhss
           next_exprs = grhs_exprs rhss
-      in mempty { rs_holds = holds, rs_writes = bind_writes }
+      in mempty { rs_writes = bind_writes }
         <> (mconcat $ map (\next_expr ->
             reduce_deep sa {
               sa_sym = next_expr,
