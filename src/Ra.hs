@@ -33,8 +33,8 @@ import Control.Monad ( guard )
 import Control.Applicative ( (<|>), liftA2 )
 import Control.Exception ( assert )
 
-import Data.Map.Strict ( Map(..), unionsWith, unions, unionWith, union, singleton, (!?), (!), foldlWithKey, foldrWithKey, keys, elems, mapWithKey, assocs)
-import qualified Data.Map.Strict as M ( null, member, empty, insert, map )
+import Data.Map.Strict ( Map(..), unionsWith, unions, unionWith, union, singleton, (!?), (!), foldlWithKey, foldrWithKey, keys, mapWithKey, assocs)
+import qualified Data.Map.Strict as M ( null, member, empty, insert, map, elems )
 import Data.Set ( Set(..), intersection, difference, (\\) )
 import qualified Data.Set as S ( fromList, member, insert )
 -- import qualified Data.Set as S ( insert )
@@ -137,7 +137,6 @@ pat_match binds =
         let m_next_args = map (map (sub t)) (sa_args sa)
             args_changed = any (any (not . null . rs_syms)) m_next_args
             next_args = map (concatMap (uncurry list_alt . (rs_syms *** pure)) . uncurry zip) (zip m_next_args (sa_args sa)) -- encode law that arguments can fail to reduce and just fall back to the original form
-            -- same number of first bits, should be same number of second bits so `zip` shouldn't fail
             m_next_syms :: Maybe (Maybe ReduceSyms)
             m_next_syms = case unLoc $ sa_sym sa of
               HsVar _ (L _ v) -> if not $ v `elem` (var_ref_tail $ sa_stack sa)
@@ -156,12 +155,21 @@ pat_match binds =
                   <$> ((stbl_table t) !? v)
                 else Nothing
               _ -> Just Nothing
-            in fromMaybe mempty (fromMaybe (
+            rs' = fromMaybe mempty (fromMaybe (
                 if args_changed
                   then mempty { rs_syms = [sa { sa_args = next_args }] } -- `sa` is NF by assumption
                   else mempty -- encode the law that if all arguments have failed and the sym has also failed, this whole match fails
               ) <$> m_next_syms) -- encode the law that if this is a var reduction cycle, then the result is empty
-      
+            
+            -- note that writes themselves are iterative: need to progressively dig writes out of the reduce cycle and substitute anything from this SymTable
+            next_writes = (\rs_ws -> unionsWith (++) $ M.map snd rs_ws : (map (rs_writes . fst) $ M.elems rs_ws))
+              $ M.map ((mconcat *** concat) . unzip . map (-- Map Pipe ([ReduceSyms], [[Write]])
+                  (\(sas, (rs, w)) -> (rs, map (\sa -> w { w_sym = sa }) sas))
+                  . (uncurry list_alt . (rs_syms *** pure . w_sym) &&& id) -- ([SymApp], (ReduceSyms, Write)) -- but I really need to suck the writes out of the ReduceSym, which I could do with the rightside object
+                  . (sub (pms_syms symsn) . w_sym &&& id)
+                )
+              ) (rs_writes rs')
+        in rs' { rs_writes = next_writes } -- implant the `sub`'d writes into the syms
       -- BOOKMARK need reduce_deep here, maybe strip away from pat_match for performance later
       
       iterant :: [Bind] -> PatMatchSyms -> (Bool, ([Bind], PatMatchSyms))
@@ -187,12 +195,13 @@ pat_match binds =
           ) -- look for if `<>` is the right thing to do on this pms chain
       syms0 = mconcat $ map snd binds
       (bindsn, symsn) = snd $ until fst (uncurry iterant . snd) (False, (binds, mempty))
+       -- Map Pipe (ReduceSyms, [Write])
   in symsn {
       pms_syms = (pms_syms symsn) {
         stbl_binds = bindsn
       },
-      pms_writes = pms_writes symsn <> rs_writes syms0
-    }
+      pms_writes = rs_writes syms0 <> pms_writes symsn
+    } -- BOOKMARK URGENT give the stbl_binds to all the pms_syms' stacks
 
 reduce :: ReduceSyms -> (Int, ReduceSyms)
 reduce syms0 =
@@ -212,28 +221,31 @@ reduce syms0 =
                 "readMVar" | length next_args > 0 -> head next_args -- list of pipes from the first arg
                 _ -> []
               _ -> []
-        in ((args_rs { rs_syms = mempty })<>) $ mconcat $ map reduce_deep $ (`list_alt` next_argd_sym) $ expanded -- a bunch of null handling
+        in ((args_rs { rs_syms = mempty })<>) $ mconcat $ map reduce_deep $ expanded `list_alt` next_argd_sym -- a bunch of null handling
         -- STACK good: relies on the pipe stack being correct
           
       
       iterant :: ReduceSyms -> (Bool, ReduceSyms)
       iterant rs =
-        let (next_pms, next_rs) = (mconcat *** mconcat) $ unzip $ map (\sa -> -- expand reads in the stack of all symbols in the reduce_syms
-                let (next_pms', next_branch) = second SB $ unzip $ map (\case
-                        af@(AppFrame { af_syms }) ->
-                          let next_binds = map (second (mconcat . map (expand_reads (rs_writes rs)) . rs_syms)) (stbl_binds af_syms)
-                              next_pms'' = pat_match next_binds
-                          in (next_pms'', af {
-                              af_syms = pms_syms next_pms''
-                            })
-                        v -> (mempty, v)
-                      ) (unSB $ st_branch $ sa_stack sa)
-                in (mconcat next_pms', expand_reads (rs_writes rs) $ sa { -- `Writes x StackFrame` product happens here
-                  sa_stack = (sa_stack sa) {
-                    st_branch = next_branch
-                  }
-                })
-              ) $ rs_syms rs
+        let update_branch sa =
+              let (next_pms, next_branch) = (mconcat *** SB) $ unzip $ map (\case
+                      af@(AppFrame { af_syms }) ->
+                        let next_binds = map (second (mconcat . map (expand_reads (rs_writes rs)) . rs_syms)) (stbl_binds af_syms)
+                            next_pms' = pat_match next_binds
+                        in (next_pms', af {
+                            af_syms = pms_syms next_pms'
+                          })
+                      v -> (mempty, v)
+                    ) (unSB $ st_branch $ sa_stack sa)
+                  (next_args_pms, next_args) = unzip $ map (unzip . map update_branch) (sa_args sa)
+              in (next_pms <> (mconcat $ mconcat next_args_pms), sa {
+                sa_stack = (sa_stack sa) {
+                  st_branch = next_branch
+                },
+                sa_args = next_args
+              })
+              
+            (next_pms, next_rs) = (mconcat *** mconcat) $ unzip $ map (second (expand_reads (rs_writes rs)) . update_branch) $ rs_syms rs
             next_writes = (rs_writes next_rs) <> (pms_writes next_pms)
         in (M.null next_writes, next_rs {
             rs_writes = next_writes
@@ -325,7 +337,7 @@ reduce_deep sa@(SA consumers stack sym args) =
               mempty
            | Just left_syms <- stack_var_lookup True v stack -> -- this absolutely sucks, we have to use the "soft" search because instance name Uniques are totally unusable. Can't even use `Name`, unless I convert to string every time... which I might need to do in the future for performance reasons if I can't come up with a solution for this. 
             mconcat $ map (\sa' ->
-                reduce_deep sa' {
+                reduce_deep sa' { -- TODO: check if `reduce_deep` is actually necessary here; might not be because we expect the symbols in the stack to be resolved
                   sa_args = sa_args sa' ++ args', -- ARGS good: elements in the stack are already processed, so if their args are okay these ones are okay
                   sa_stack = (sa_stack sa') {
                     st_branch = mapSB ((VarRefFrame v):) (st_branch (sa_stack sa'))
