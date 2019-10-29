@@ -24,15 +24,6 @@ module Main where
 
   import Outputable ( Outputable, interppSP, showSDocUnsafe, showPpr )
 
-  ppr :: Outputable a => a -> String
-  ppr = showSDocUnsafe . interppSP . pure
-  
-  ppr_branch :: StackBranch -> String
-  ppr_branch = foldr (\case
-      AppFrame sa syms -> flip (foldr ((++) . (++"\n\n") . uncurry (++) . (((++", ") . ppr) *** concatMap (ppr . sa_sym)))) (M.assocs syms) . (++"---\n\n")
-      _ -> id
-    ) "" . unSB
-
   main :: IO ()
   main = do
     mod_str:_ <- getArgs
@@ -51,9 +42,10 @@ module Main where
       t <- typecheckModule p
       
       let st0 = Stack (SB []) (SB [], SB [])
-          initial_pms = grhs_binds st0 (typecheckedSource t)
+          initial_pms = pat_match $ grhs_binds st0 (typecheckedSource t)
           syms0 = pms2rs initial_pms -- (\s -> s { sa_stack = append_frame (AppFrame s (pms_syms initial_pms)) (sa_stack s) }) $ head $ (!!0) $ M.elems $ 
       
-      -- return $ ppr_rs (showPpr dflags) $ reduce syms0
-      return $ ppr_pms (showPpr dflags) initial_pms
+      -- return $ uncurry (++) . (show *** ppr_rs (showPpr dflags)) $ reduce $ (!!1) $ catMaybes $ map (\b -> case unLoc b of { AbsBinds {} -> Just $ snd $ head $ bind_to_table st0 (unLoc b); _ -> Nothing }) $ bagToList (typecheckedSource t)
+      return $ uncurry (++) . (show *** ppr_rs (showPpr dflags)) $ reduce syms0
+      -- return $ ppr_pms (showPpr dflags) initial_pms
       -- return $ constr_ppr $ typecheckedSource t
