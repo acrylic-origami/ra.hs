@@ -197,21 +197,23 @@ reduce :: ReduceSyms -> (Int, ReduceSyms)
 reduce syms0 =
   let expand_reads :: Writes -> SymApp -> ReduceSyms
       expand_reads ws sa =
-        let (args_rs, next_args) = first (mconcat) $ unzip $ map ((mconcat *** concat) . unzip . (map $ \sa' ->
-                (id &&& (`list_alt` [sa']) . rs_syms) $ expand_reads ws sa'
+        let m_next_args = map (map (\sa' ->
+                lift_rs_syms2 list_alt (expand_reads ws sa') (mempty { rs_syms = [sa'] })
               )) (sa_args sa)
-            next_argd_sym -- | all null next_args = []
+            next_argd_sym -- | all null m_next_args = []
                           -- | otherwise =
-                          = [sa {
-                             sa_args = next_args
-                           }]
-            expanded = case sa_sym sa of
+                          = mempty { rs_syms = [sa {
+                             sa_args = map (concatMap rs_syms) m_next_args
+                           }] }
+            expanded = mconcat $ case sa_sym sa of
               Sym (L _ (HsVar _ v)) -> case varString $ unLoc v of
-                "newEmptyMVar" -> fromMaybe mempty (map (w_sym) <$> ws !? make_stack_key sa)
-                "readMVar" | length next_args > 0 -> head next_args -- list of pipes from the first arg
+                "newEmptyMVar" -> fromMaybe mempty (map (expand_reads ws . w_sym) <$> ws !? make_stack_key sa)
+                "readMVar" | length m_next_args > 0 -> head m_next_args -- list of pipes from the first arg
                 _ -> []
               _ -> []
-        in ((args_rs { rs_syms = mempty })<>) $ mconcat $ map reduce_deep $ expanded `list_alt` next_argd_sym -- a bunch of null handling
+        in (((mconcat $ mconcat m_next_args) { rs_syms = mempty })<>) 
+          $ mconcat $ map reduce_deep 
+          $ rs_syms $ lift_rs_syms2 list_alt expanded next_argd_sym -- a bunch of null handling that looks like a mess because it is
         -- STACK good: relies on the pipe stack being correct
           
       
