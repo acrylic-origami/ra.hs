@@ -6,7 +6,8 @@ module Ra.Lang.Extra (
   ppr_rs,
   ppr_pms,
   ppr_stack,
-  ppr_branch
+  ppr_branch,
+  ppr_writes
 ) where
 
 import GHC ( LHsExpr, GhcTc )
@@ -48,8 +49,8 @@ ppr_sa show' = go 0 where
 ppr_writes :: Printer -> Writes -> String
 ppr_writes show' = concatMap ((++"\n---\n") . uncurry ((++) . (++" -> ")) . (show' *** concatMap ((++"\n") . ppr_sa show' . w_sym))) . assocs
 
-ppr_hold :: Printer -> Hold -> String
-ppr_hold show' = uncurry ((++) . (++" <- ")) . (show' . h_pat &&& ppr_sa show' . h_sym)
+-- ppr_hold :: Printer -> Hold -> String
+-- ppr_hold show' = uncurry ((++) . (++" <- ")) . (show' . h_pat &&& ppr_sa show' . h_sym)
 
 ppr_rs :: Printer -> ReduceSyms -> String
 ppr_rs show' = flip concatMap printers . (("\n===\n"++).) . flip ($) where

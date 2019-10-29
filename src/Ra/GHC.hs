@@ -53,7 +53,7 @@ bind_to_table st b = case b of
     let subbinds = mconcat $ bagToList $ mapBag (bind_to_table st . unLoc) abs_binds
     in subbinds <> map (
         VarPat NoExt . noLoc . abe_poly
-        &&& reduce_deep . ((flip (SA [] st)) []) . noLoc . HsVar NoExt . noLoc . abe_mono
+        &&& reduce_deep . ((flip (SA [] st)) []) . Sym . noLoc . HsVar NoExt . noLoc . abe_mono
       ) abs_exports
     
   -- AbsBindsSig { abs_sig_export, abs_sig_bind = L _ abs_sig_bind } -> 
@@ -68,14 +68,14 @@ bind_to_table st b = case b of
   FunBind { fun_id = fun_id, fun_matches } -> [(
       VarPat NoExt fun_id,
       mempty {
-        rs_syms = [SA [] st (noLoc $ HsLam NoExt fun_matches) []]
+        rs_syms = [SA [] st (Sym $ noLoc $ HsLam NoExt fun_matches) []]
       }
     )]
   
   PatBind { pat_lhs = L _ pat_lhs, pat_rhs } ->
     grhs_binds st pat_rhs <> [(
         pat_lhs,
-        mconcat $ map (reduce_deep . flip (SA [] st) []) (grhs_exprs pat_rhs)
+        mconcat $ map (reduce_deep . flip (SA [] st) [] . Sym) (grhs_exprs pat_rhs)
       )]
   VarBind{} -> mempty
   _ -> error $ constr_ppr b
@@ -90,7 +90,7 @@ grhs_binds st = everythingBut (<>) (
     (mempty, False)
     `mkQ` ((,True) . bind_to_table st)
     `extQ` ((,False) . ((\case
-        BindStmt _ (L _ pat) expr _ _ -> [(pat, reduce_deep (SA [] st expr []))]
+        BindStmt _ (L _ pat) expr _ _ -> [(pat, reduce_deep (SA [] st (Sym expr) []))]
         _ -> mempty
       ) . unLoc :: LStmt GhcTc (LHsExpr GhcTc) -> [Bind])) -- TODO dangerous: should we really keep looking deeper after finding a BindStmt?
     `extQ` ((mempty,) . ((\case 

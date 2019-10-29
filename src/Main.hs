@@ -23,7 +23,7 @@ module Main where
   import Ra.Lang.Extra
 
   import Outputable ( Outputable, interppSP, showSDocUnsafe, showPpr )
-  
+
   main :: IO ()
   main = do
     mod_str:_ <- getArgs
@@ -45,6 +45,7 @@ module Main where
           initial_pms = pat_match $ grhs_binds st0 (typecheckedSource t)
           syms0 = pms2rs initial_pms -- (\s -> s { sa_stack = append_frame (AppFrame s (pms_syms initial_pms)) (sa_stack s) }) $ head $ (!!0) $ M.elems $ 
       
+      -- return $ uncurry (++) . (show *** ppr_rs (showPpr dflags)) $ reduce $ (!!1) $ catMaybes $ map (\b -> case unLoc b of { AbsBinds {} -> Just $ snd $ head $ bind_to_table st0 (unLoc b); _ -> Nothing }) $ bagToList (typecheckedSource t)
       return $ uncurry (++) . (show *** ppr_rs (showPpr dflags)) $ reduce syms0
       -- return $ ppr_pms (showPpr dflags) initial_pms
       -- return $ constr_ppr $ typecheckedSource t

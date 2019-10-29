@@ -1,17 +1,18 @@
-{-# LANGUAGE TupleSections, DeriveFunctor, LambdaCase, NamedFieldPuns #-}
+{-# LANGUAGE TupleSections, DeriveFunctor, DeriveDataTypeable, LambdaCase, NamedFieldPuns #-}
 module Ra.Lang (
   Sym(..),
+  getSymLoc,
   SymTable(..),
   StackBranch(..),
   StackKey,
-  ThreadKey(..),
+  -- ThreadKey(..),
   StackFrame(..),
   unSB,
   mapSB,
   Stack(..),
   stack_var_lookup,
   make_stack_key,
-  make_thread_key,
+  -- make_thread_key,
   var_ref_tail,
   update_head_table,
   append_frame,
@@ -24,7 +25,7 @@ module Ra.Lang (
   SymApp(..),
   Write(..),
   Writes(..),
-  Hold(..),
+  -- Hold(..),
   Pipe,
   Bind,
   ReduceStateMachine(..),
@@ -37,7 +38,8 @@ module Ra.Lang (
 import GHC
 import Var ( varName, varType )
 import Type ( eqType )
-import Outputable (showPpr)
+import qualified Pretty ( empty, text )
+import Outputable ( showPpr, Outputable(..), docToSDoc )
 
 -- for runIO# synthesis
 import Name ( mkSystemName )
@@ -47,6 +49,7 @@ import FastString ( mkFastString )
 import Var ( mkLocalVar )
 import IdInfo ( vanillaIdInfo, IdDetails(VanillaId) )
 
+import Data.Data ( Data(..), Typeable(..) )
 import Data.Tuple.Extra ( second, both, (***), (&&&) )
 import Data.Coerce ( coerce )
 import Data.Map.Strict ( Map(..), empty, union, unionWith, unionsWith, toList, fromList, (!?), filterWithKey, elems )
@@ -62,7 +65,25 @@ import Ra.Extra ( update_head, zipAll )
 
 -- Note about making SymTables from bindings: `Fun` needs to be lifted to `HsExpr` through the `HsLam` constructor. This is to unify the type of the binding to `HsExpr` while retaining MatchGroup which is necessary at HsApp on a named function.
 
-type Sym = LHsExpr GhcTc
+data Sym =
+  Sym (LHsExpr GhcTc)
+  | TupleConstr SrcSpan
+  | ListConstr SrcSpan
+  deriving (Data, Typeable)
+
+instance Outputable Sym where
+  ppr (Sym v) = ppr v
+  ppr (TupleConstr _) = docToSDoc (Pretty.text "()")
+  ppr (ListConstr _) = docToSDoc (Pretty.text "[]")
+  
+  pprPrec r (Sym v) = pprPrec r v
+  pprPrec _ (TupleConstr _) = docToSDoc (Pretty.text "()")
+  pprPrec _ (ListConstr _) = docToSDoc (Pretty.text "[]")
+  
+getSymLoc (Sym v) = getLoc v
+getSymLoc (TupleConstr l) = l
+getSymLoc (ListConstr l) = l
+
 -- instance Eq Sym where
 --   (Sym loc1 _) == (Sym loc2 _) = loc1 == loc2
 -- instance Ord Sym where
@@ -87,9 +108,10 @@ instance Monoid SymTable where
   mappend = (<>)
 
 type StackKey = [SrcSpan]
-data ThreadKey = TKNormal StackKey | TKEnemy -- ThreadKey is specialized so only the stack above the latest forkIO call is included
+type Thread = (StackBranch, StackBranch)
+-- data ThreadKey = TKNormal StackKey | TKEnemy -- ThreadKey is specialized so only the stack above the latest forkIO call is included
 data Write = Write {
-  w_stack :: Stack,
+  w_thread :: Thread,
   w_sym :: SymApp
 } -- ThreadKey for the thread the write happens, StackKey for dedupeing writes in the top-level state machine
 
@@ -118,14 +140,8 @@ instance Eq SymApp where
     preds = [
         uncurry (==) . both sa_args,
         uncurry (==) . both (st_branch . sa_stack),
-        uncurry (==) . both (getLoc . sa_sym)
+        uncurry (==) . both (getSymLoc . sa_sym)
       ]
-    
-
-data Hold = Hold {
-  h_pat :: Pat GhcTc,
-  h_sym :: SymApp
-}
 
 data PatMatchSyms = PatMatchSyms {
   pms_syms :: SymTable,
@@ -179,7 +195,7 @@ instance Eq StackBranch where
       uncurry (==) . both length
       &&& all (uncurry pred) . uncurry zip
     ) . both unSB where
-    pred (AppFrame { af_raw = l }) (AppFrame { af_raw = r }) = (getLoc $ sa_sym l) == (getLoc $ sa_sym r) -- don't push the equality recursion any further
+    pred (AppFrame { af_raw = l }) (AppFrame { af_raw = r }) = (getSymLoc $ sa_sym l) == (getSymLoc $ sa_sym r) -- don't push the equality recursion any further
     pred (VarRefFrame l) (VarRefFrame r) = l == r
     pred _ _ = False
 
@@ -207,7 +223,7 @@ instance Monoid StackBranch where
 
 data Stack = Stack {
   st_branch :: StackBranch,
-  st_thread :: (StackBranch, StackBranch) -- stack of forkIO and stack of thing being forked resp.; this pair is unique if the anti-cycle works properly
+  st_thread :: Thread -- stack of forkIO and stack of thing being forked resp.; this pair is unique if the anti-cycle works properly
 }
 
 -- instance Eq Stack where
@@ -255,24 +271,26 @@ instance Monoid ReduceStateMachine where
   mappend = (<>)
   
 is_zeroth_kind :: Sym -> Bool
-is_zeroth_kind sym = case unLoc sym of
+is_zeroth_kind (Sym sym) = case unLoc sym of
   HsLit _ _ -> True
   HsOverLit _ _ -> True
   ExplicitTuple _ _ _ -> True
   ExplicitList _ _ _ -> True
   _ -> False
+is_zeroth_kind _ = False
 
-make_thread_key :: Stack -> ThreadKey
-make_thread_key stack = undefined {- TKNormal $
+-- make_thread_key :: Stack -> ThreadKey
+-- make_thread_key stack = undefined 
+{- TKNormal $
   if not $ null $ st_thread stack
     then drop ((length $ unSB $ st_branch stack) - (head $ st_thread stack)) $ make_stack_key stack
     else mempty -}
 
 make_stack_key :: SymApp -> StackKey
 make_stack_key = uncurry (:) . (
-    getLoc . sa_sym
+    getSymLoc . sa_sym
     &&& catMaybes . map (\case
-        AppFrame { af_raw } -> Just $ getLoc $ sa_sym af_raw
+        AppFrame { af_raw } -> Just $ getSymLoc $ sa_sym af_raw
         VarRefFrame _ -> Nothing
       ) . unSB . st_branch . sa_stack -- map fst . unSB . st_branch
   )
