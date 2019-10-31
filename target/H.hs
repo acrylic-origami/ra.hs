@@ -8,7 +8,7 @@ type Consumer a b = a -> b
 foo :: IO Int
 foo = do
   let x = 42
-      y = x
+      y = bar x
   v <- newEmptyMVar
   w <- newEmptyMVar
   _ <- putMVar w (v, 42)

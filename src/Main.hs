@@ -14,7 +14,7 @@ module Main where
   import Data.Generics.Extra ( constr_ppr, shallowest, everything_ppr )
   import qualified Data.Map.Strict as M ( empty, elems )
   import Data.Tuple.Extra ( first, (&&&), (***) )
-  import Data.Maybe ( fromMaybe )
+  import Data.Maybe ( fromMaybe, catMaybes )
   import Control.Monad ( mzero )
   
   import Ra ( pat_match, reduce, reduce_deep )
@@ -47,5 +47,6 @@ module Main where
       
       -- return $ uncurry (++) . (show *** ppr_rs (showPpr dflags)) $ reduce $ (!!1) $ catMaybes $ map (\b -> case unLoc b of { AbsBinds {} -> Just $ snd $ head $ bind_to_table st0 (unLoc b); _ -> Nothing }) $ bagToList (typecheckedSource t)
       return $ uncurry (++) . (show *** ppr_rs (showPpr dflags)) $ reduce syms0
+      -- return $ concatMap ((++"\n") . uncurry ((++) . (++" -> ")) . (showPpr dflags *** concatMap (ppr_stack (showPpr dflags) . sa_stack))) $ M.assocs $ stbl_table (pms_syms initial_pms)
       -- return $ ppr_pms (showPpr dflags) initial_pms
       -- return $ constr_ppr $ typecheckedSource t

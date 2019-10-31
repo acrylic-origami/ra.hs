@@ -133,10 +133,11 @@ pat_match binds =
                 then Just $
                   (
                       mconcat
-                      . map (uncurry (lift_rs_syms2 list_alt))
-                      . map (sub t &&& reduce_deep)
+                      -- . map (\rs' ->
+                      --     let rss' = map (sub t) (rs_syms rs')
+                      --     in map (uncurry (id )) (zip rss' (rs_syms rs')))
                       . map (\sa' ->
-                          sa' {
+                          reduce_deep $ sa' {
                             sa_stack = append_frame (VarRefFrame v) (sa_stack sa'),
                             sa_args = (sa_args sa') <> next_args
                           }
@@ -145,44 +146,41 @@ pat_match binds =
                   <$> ((stbl_table t) !? v)
                 else Nothing
               _ -> Just Nothing
-            rs' = fromMaybe mempty (fromMaybe (
-                if args_changed
-                  then mempty { rs_syms = [sa { sa_args = next_args }] } -- `sa` is NF by assumption
-                  else mempty -- encode the law that if all arguments have failed and the sym has also failed, this whole match fails
-              ) <$> m_next_syms) -- encode the law that if this is a var reduction cycle, then the result is empty
-            
-            -- note that writes themselves are iterative: need to progressively dig writes out of the reduce cycle and substitute anything from this SymTable
-            next_writes = (\rs_ws -> unionsWith (++) $ M.map snd rs_ws : (map (rs_writes . fst) $ M.elems rs_ws))
-              $ M.map ((mconcat *** concat) . unzip . map (-- Map Pipe ([ReduceSyms], [[Write]])
-                  (\(sas, (rs, w)) -> (rs, map (\sa -> w { w_sym = sa }) sas))
-                  . (uncurry list_alt . (rs_syms *** pure . w_sym) &&& id) -- ([SymApp], (ReduceSyms, Write)) -- but I really need to suck the writes out of the ReduceSym, which I could do with the rightside object
-                  . (sub (pms_syms symsn) . w_sym &&& id)
-                )
-              ) (rs_writes rs')
-        in rs' { rs_writes = next_writes } -- implant the `sub`'d writes into the syms
-      -- BOOKMARK need reduce_deep here, maybe strip away from pat_match for performance later
+        in fromMaybe mempty (fromMaybe (
+            if args_changed
+              then mempty { rs_syms = [sa { sa_args = next_args }] } -- `sa` is NF by assumption
+              else mempty -- encode the law that if all arguments have failed and the sym has also failed, this whole match fails
+          ) <$> m_next_syms) -- encode the law that if this is a var reduction cycle, then the result is empty -- implant the `sub`'d writes into the syms
       
       iterant :: [Bind] -> PatMatchSyms -> (Bool, ([Bind], PatMatchSyms))
       iterant binds' pms =
         let next_pms = fromMaybe mempty $ mconcat $ map (mconcat . uncurry map . (pat_match_one *** rs_syms)) binds'
             m_next_syms = map (map (sub (pms_syms next_pms)) . rs_syms) (map snd binds') -- [[ReduceSyms]]
-            changed = any (any (not . null . rs_syms)) m_next_syms
-            next_syms = map
+            next_binds = map
               (\(next_rss, (prev_pat, prev_rs)) ->
                   (prev_pat, (prev_rs <> mconcat next_rss) {
                       rs_syms = concatMap (uncurry list_alt . (rs_syms *** pure)) (zip next_rss (rs_syms prev_rs))
                     })
                 ) (zip m_next_syms binds') -- [([ReduceSyms], (Pat, ReduceSyms))]
+            
+            -- note that writes themselves are iterative: need to progressively dig writes out of the reduce cycle and substitute anything from this SymTable
+            next_writes = (\rs_ws -> unionsWith (++) $ M.map snd rs_ws : (map (rs_writes . fst) $ M.elems rs_ws))
+              $ M.map ((mconcat *** concat) . unzip . map (-- Map Pipe ([ReduceSyms], [[Write]])
+                  (\(sas, (rs, w)) -> (rs, map (\sa -> w { w_sym = sa }) sas))
+                  . (uncurry list_alt . (rs_syms *** pure . w_sym) &&& id)
+                  . (sub (pms_syms next_pms) . w_sym &&& id)
+                )
+              ) (unionWith (++) (pms_writes next_pms) (rs_writes $ mconcat $ mconcat m_next_syms))
+              
         in (
-            not changed,
+            (any (any (null . rs_syms)) m_next_syms) && (M.null next_writes),
             (
-                next_syms,
-                next_pms -- prefer new sym matches because it's purely progressive
-              ) -- {
-            -- pms_syms = pms_syms next_pms `map_alt` pms_syms pms -- pms_syms: why only take the left hand side if it exists? It's almost like the bindings might be repeated, but substitution clearly makes a lasting change. 
-              -- ah, except in the last case, where there are no changes, but we slap all the successes into the body anyways. 
-          -- }
-          ) -- look for if `<>` is the right thing to do on this pms chain
+                next_binds,
+                next_pms {
+                  pms_writes = next_writes
+                } -- prefer new sym matches because it's purely progressive
+              )
+          )
       syms0 = mconcat $ map snd binds
       (bindsn, symsn) = snd $ until fst (uncurry iterant . snd) (False, (binds, mempty))
        -- Map Pipe (ReduceSyms, [Write])
@@ -207,7 +205,7 @@ reduce syms0 =
                            }] }
             expanded = mconcat $ case sa_sym sa of
               Sym (L _ (HsVar _ v)) -> case varString $ unLoc v of
-                "newEmptyMVar" -> fromMaybe mempty (map (expand_reads ws . w_sym) <$> ws !? make_stack_key sa)
+                "newEmptyMVar" -> fromMaybe mempty (map (expand_reads ws . w_sym) <$> ws !? make_stack_key sa) -- by only taking `w_sym`, encode the law that write threads are not generally the threads that read (obvious saying it out loud, but it does _look_ like we're losing information here)
                 "readMVar" | length m_next_args > 0 -> head m_next_args -- list of pipes from the first arg
                 _ -> []
               _ -> []
@@ -317,6 +315,7 @@ reduce_deep sa@(SA consumers stack m_sym args) =
                     = (map (\b -> b { sa_consumers = make_stack_key sa : (sa_consumers b) }) arg1) : rest -- identify as consumer-consumed values
                      -- TODO refactor with lenses
                   | otherwise = args
+            terminal' = mempty { rs_syms = [sa { sa_args = args' }] }
         in (\rs@(ReduceSyms { rs_syms }) -> -- enforce nesting rule: all invokations on consumed values are consumed
             rs {
                 rs_syms = map (\sa' -> sa' { sa_consumers = sa_consumers sa' ++ consumers }) rs_syms -- TODO <- starting to question if this is doubling work
@@ -377,17 +376,17 @@ reduce_deep sa@(SA consumers stack m_sym args) =
                     
               "putMVar" -> if length args' >= 2
                 then
-                  let (pipes:vals:_) = sa_args sa -- args' -- BOOKMARK args' and sa/terminal are incomparable: we lose the `consumed` property this way
+                  let (pipes:vals:_) = args'
                       next_writes = map (\pipe -> case sa_sym pipe of
                           Sym (L _ (HsVar _ v)) | varString (unLoc v) == "newEmptyMVar" -> singleton (make_stack_key pipe) $ map (\val -> Write (st_thread stack) val) vals
                           _ -> mempty
                         ) pipes
-                  in terminal { -- this is a bit silly atm since terminal writes are empty, but not necessarily all the time
+                  in terminal' { -- this is a bit silly atm since terminal writes are empty, but not necessarily all the time
                       rs_writes = unionsWith (++) (rs_writes terminal : next_writes)
                     }
-                else terminal
+                else terminal'
                 
-              _ -> terminal
+              _ -> terminal'
         
       HsApp _ _ _ -> -- this should only come up from the GHC AST, not from our own reduce-unwrap-wrap
         let (fun, next_args) = deapp sym

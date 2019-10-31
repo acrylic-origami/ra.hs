@@ -67,9 +67,7 @@ bind_to_table st b = case b of
   -------------------
   FunBind { fun_id = fun_id, fun_matches } -> [(
       VarPat NoExt fun_id,
-      mempty {
-        rs_syms = [SA [] st (Sym $ noLoc $ HsLam NoExt fun_matches) []]
-      }
+      reduce_deep (SA [] st (Sym $ noLoc $ HsLam NoExt fun_matches) [])
     )]
   
   PatBind { pat_lhs = L _ pat_lhs, pat_rhs } ->
