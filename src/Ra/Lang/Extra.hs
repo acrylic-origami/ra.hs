@@ -6,7 +6,6 @@ module Ra.Lang.Extra (
   ppr_rs,
   ppr_pms,
   ppr_stack,
-  ppr_branch,
   ppr_writes
 ) where
 
@@ -47,7 +46,7 @@ ppr_sa show' = go 0 where
           )
 
 ppr_writes :: Printer -> Writes -> String
-ppr_writes show' = concatMap ((++"\n---\n") . uncurry ((++) . (++" -> ")) . (show' *** concatMap ((++"\n") . ppr_sa show' . w_sym))) . assocs
+ppr_writes show' = concatMap ((++"\n---\n") . uncurry ((++) . (++" -> ")) . (show' *** concatMap ((++"\n") . ppr_sa show'))) . assocs
 
 -- ppr_hold :: Printer -> Hold -> String
 -- ppr_hold show' = uncurry ((++) . (++" <- ")) . (show' . h_pat &&& ppr_sa show' . h_sym)
@@ -66,23 +65,23 @@ ppr_pms show' = flip concatMap printers . (("\n===\n"++).) . flip ($) where
       , ppr_writes show' . pms_writes
     ]
 
-ppr_stack :: Printer -> Stack -> String
-ppr_stack show' =
-  show . map (\case
-      AppFrame { af_syms, af_raw } ->
-        ppr_sa show' af_raw
-        ++ ", "
-        ++ (show $ map (
-            uncurry ((++) . (++" -> ")) . (
-                show'
-                *** concat . intersperse "\n" . map (ppr_sa show')
-              )
-          ) (M.assocs $ stbl_table af_syms))
-      VarRefFrame v -> show' v
-    ) . unSB . st_branch
+-- ppr_stack :: Printer -> Stack -> String
+-- ppr_stack show' =
+--   show . map (\case
+--       AppFrame { af_syms, af_raw } ->
+--         ppr_sa show' af_raw
+--         ++ ", "
+--         ++ (show $ map (
+--             uncurry ((++) . (++" -> ")) . (
+--                 show'
+--                 *** concat . intersperse "\n" . map (ppr_sa show')
+--               )
+--           ) (M.assocs $ stbl_table af_syms))
+--       VarRefFrame v -> show' v
+--     ) . unSB
 
-ppr_branch :: Printer -> StackBranch -> String
-ppr_branch show' = foldr (\case
+ppr_stack :: Printer -> Stack -> String
+ppr_stack show' = foldr (\case
     AppFrame sa syms -> flip (foldr ((++) . (++"\n\n") . uncurry (++) . (((++", ") . show') *** concatMap (show' . sa_sym)))) (M.assocs $ stbl_table syms) . (++"---\n\n")
     _ -> id
   ) "" . unSB

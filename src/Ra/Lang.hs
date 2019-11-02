@@ -3,19 +3,17 @@ module Ra.Lang (
   Sym(..),
   getSymLoc,
   SymTable(..),
-  StackBranch(..),
+  Stack(..),
   StackKey,
   -- ThreadKey(..),
   StackFrame(..),
   unSB,
   mapSB,
-  Stack(..),
   stack_var_lookup,
   make_stack_key,
   -- make_thread_key,
   var_ref_tail,
   update_head_table,
-  append_frame,
   ReduceSyms(..),
   PatMatchSyms(..),
   append_pms_writes,
@@ -23,7 +21,8 @@ module Ra.Lang (
   pms2rs,
   lift_rs_syms2,
   SymApp(..),
-  Write(..),
+  sa_from_sym,
+  Write,
   Writes(..),
   -- Hold(..),
   Pipe,
@@ -69,20 +68,24 @@ data Sym =
   Sym (LHsExpr GhcTc)
   | TupleConstr SrcSpan
   | ListConstr SrcSpan
+  | EntryPoint
   deriving (Data, Typeable)
 
 instance Outputable Sym where
   ppr (Sym v) = ppr v
   ppr (TupleConstr _) = docToSDoc (Pretty.text "()")
   ppr (ListConstr _) = docToSDoc (Pretty.text "[]")
+  ppr EntryPoint = docToSDoc (Pretty.text "<<ENTRYPOINT>>")
   
   pprPrec r (Sym v) = pprPrec r v
   pprPrec _ (TupleConstr _) = docToSDoc (Pretty.text "()")
   pprPrec _ (ListConstr _) = docToSDoc (Pretty.text "[]")
+  pprPrec _ EntryPoint = docToSDoc (Pretty.text "<<ENTRYPOINT>>")
   
 getSymLoc (Sym v) = getLoc v
 getSymLoc (TupleConstr l) = l
 getSymLoc (ListConstr l) = l
+getSymLoc EntryPoint = noSrcSpan
 
 -- instance Eq Sym where
 --   (Sym loc1 _) == (Sym loc2 _) = loc1 == loc2
@@ -94,11 +97,12 @@ getSymLoc (ListConstr l) = l
 --     expr = f $ expr sym
 --   }
   
-type Bind = (Pat GhcTc, ReduceSyms)
+type Bind = (Pat GhcTc, [SymApp])
 data SymTable = SymTable {
   stbl_table :: Map Id [SymApp], -- strictly speaking, binds => table always, but it's so expensive both performance-wise and in code, so memoization does something good here
   stbl_binds :: [Bind]
 }
+  deriving (Data, Typeable)
 
 instance Semigroup SymTable where
   (SymTable ltbl lbinds) <> (SymTable rtbl rbinds) = SymTable (unionWith (++) ltbl rtbl) (lbinds <> rbinds)
@@ -108,12 +112,9 @@ instance Monoid SymTable where
   mappend = (<>)
 
 type StackKey = [SrcSpan]
-type Thread = (StackBranch, StackBranch)
+type Thread = (Stack, Stack)
 -- data ThreadKey = TKNormal StackKey | TKEnemy -- ThreadKey is specialized so only the stack above the latest forkIO call is included
-data Write = Write {
-  w_thread :: Thread,
-  w_sym :: SymApp
-} -- ThreadKey for the thread the write happens, StackKey for dedupeing writes in the top-level state machine
+type Write = SymApp
 
 -- Write instances allowing them to be keys
 -- instance Eq Write where
@@ -132,25 +133,30 @@ data SymApp = SA {
     -- 1. if a term is consumed and decomposed or part of an unknown/partial application, the whole term is consumed under the same consumer[s]
     -- 2. if a term goes through multiple consumers, they're all tracked for races individually
   sa_sym :: Sym,
-  sa_args :: [[SymApp]]
-} -- 2D tree. Too bad we can't use Tree; the semantics are totally different
+  sa_args :: [[SymApp]],
+  sa_thread :: (SrcSpan, Stack) -- TODO consider a more elegant type
+} deriving (Data, Typeable) -- 2D tree. Too bad we can't use Tree; the semantics are totally different
+
+sa_from_sym s = SA mempty mempty s mempty (noSrcSpan, mempty)
 
 instance Eq SymApp where
   (==) = curry $ flip all preds . flip ($) where
     preds = [
         uncurry (==) . both sa_args,
-        uncurry (==) . both (st_branch . sa_stack),
-        uncurry (==) . both (getSymLoc . sa_sym)
+        uncurry (==) . both sa_stack,
+        uncurry (==) . both (getSymLoc . sa_sym),
+        uncurry (==) . both sa_thread
       ]
 
 data PatMatchSyms = PatMatchSyms {
   pms_syms :: SymTable,
   pms_writes :: Writes
-}
+} deriving (Data, Typeable)
+
 data ReduceSyms = ReduceSyms {
   rs_syms :: [SymApp],
   rs_writes :: Writes
-}
+} deriving (Data, Typeable)
 
 lift_rs_syms2 :: ([SymApp] -> [SymApp] -> [SymApp]) -> ReduceSyms -> ReduceSyms -> ReduceSyms
 lift_rs_syms2 f a b = (a <> b) {
@@ -176,21 +182,22 @@ pms2rs pms = ReduceSyms {
   rs_writes = pms_writes pms
 }
 
-data StackFrame = VarRefFrame Id | AppFrame {
+data StackFrame = EmptyFrame | VarRefFrame Id | AppFrame {
   af_raw :: SymApp, -- for anti-cycle purposes
   af_syms :: SymTable
-}
+} 
+  deriving (Data, Typeable)
 
 -- BOOKMARK: Stack needs to be oufitted with the graph of bindings that refer to each other, in case a hold resolves and a new pattern match works.
 
-newtype StackBranch = SB [StackFrame] -- TODO flatten this to type alias -- nodes: consecutive ones are child-parent
+newtype Stack = SB [StackFrame] deriving (Data, Typeable) -- TODO flatten this to type alias -- nodes: consecutive ones are child-parent
 unSB (SB v) = v
 mapSB f = SB . f . unSB
   
--- instance Ord StackBranch where
+-- instance Ord Stack where
 --   (<=) = (curry $ uncurry (<=) . both (map fst . unSB))
 
-instance Eq StackBranch where
+instance Eq Stack where
   (==) = curry $ uncurry (&&) . (
       uncurry (==) . both length
       &&& all (uncurry pred) . uncurry zip
@@ -202,39 +209,24 @@ instance Eq StackBranch where
 is_parent = undefined
 -- is_parent p q = SB (take (length (unSB q)) (unSB p)) == q
 
-is_visited :: StackBranch -> SymApp -> Bool
+is_visited :: Stack -> SymApp -> Bool
 is_visited sb sa = any (\case
     AppFrame { af_raw } -> af_raw == sa
     _ -> False
   ) (unSB sb)
 
-instance Semigroup StackBranch where
+instance Semigroup Stack where
   (<>) =
     let combine (Just a) (Just b) = assert (af_raw a == af_raw b) (a {
             af_syms = (af_syms a <> af_syms b)
-          }) -- prefer first (accumulating) branch
+          }) -- prefer first (accumulating) stack
         combine Nothing (Just b) = b
         combine (Just a) Nothing = a
     in curry $ SB . map (uncurry combine) . uncurry zipAll . both unSB
 
-instance Monoid StackBranch where
+instance Monoid Stack where
   mempty = SB mempty
   mappend = (<>)
-
-data Stack = Stack {
-  st_branch :: StackBranch,
-  st_thread :: Thread -- stack of forkIO and stack of thing being forked resp.; this pair is unique if the anti-cycle works properly
-}
-
--- instance Eq Stack where
---   l == r = st_branch l == st_branch r -- disregard thread for anti-cycle purposes
-
--- instance Semigroup Stack where
---   (Stack b_l t_l) <> (Stack b_r t_r) = Stack (b_l <> b_r) (t_l <> t_r)
-
--- instance Monoid Stack where
---   mempty = Stack mempty mempty
---   mappend = (<>)
 
 instance Semigroup ReduceSyms where
   (ReduceSyms lsyms lwrites) <> (ReduceSyms rsyms  rwrites) = ReduceSyms (lsyms <> rsyms) (unionWith (++) lwrites rwrites) -- is there a nicer way to do this?
@@ -283,7 +275,7 @@ is_zeroth_kind _ = False
 -- make_thread_key stack = undefined 
 {- TKNormal $
   if not $ null $ st_thread stack
-    then drop ((length $ unSB $ st_branch stack) - (head $ st_thread stack)) $ make_stack_key stack
+    then drop ((length $ unSB stack) - (head $ st_thread stack)) $ make_stack_key stack
     else mempty -}
 
 make_stack_key :: SymApp -> StackKey
@@ -291,21 +283,18 @@ make_stack_key = uncurry (:) . (
     getSymLoc . sa_sym
     &&& catMaybes . map (\case
         AppFrame { af_raw } -> Just $ getSymLoc $ sa_sym af_raw
-        VarRefFrame _ -> Nothing
-      ) . unSB . st_branch . sa_stack -- map fst . unSB . st_branch
+        _ -> Nothing
+      ) . unSB . sa_stack -- map fst . unSB
   )
 
 -- var_ref_tail used for the law that var resolution cycles only apply to the tail
 var_ref_tail :: Stack -> [Id]
-var_ref_tail = var_ref_tail' . unSB . st_branch where
+var_ref_tail = var_ref_tail' . unSB where
   var_ref_tail' ((VarRefFrame v):rest) = v:(var_ref_tail' rest)
   var_ref_tail' _ = []
 
 stack_var_lookup :: Bool -> Id -> Stack -> Maybe [SymApp]
-stack_var_lookup soft v = branch_var_lookup soft v . st_branch
-
-branch_var_lookup :: Bool -> Id -> StackBranch -> Maybe [SymApp]
-branch_var_lookup soft v = foldr (\case
+stack_var_lookup soft v = foldr (\case
     AppFrame { af_syms } -> (<|>(pick $ stbl_table af_syms))
     _ -> id
   ) Nothing . unSB where
@@ -314,17 +303,11 @@ branch_var_lookup soft v = foldr (\case
       else (!?v)
 
 update_head_table :: SymTable -> Stack -> Stack
-update_head_table next_table st = undefined {- st {
-  st_branch = SB $ update_head (second (uncurry (<>) . (,next_table))) $ unSB $ st_branch st
+update_head_table next_table st = undefined {- mapSB update_head (second (uncurry (<>) . (,next_table))) st
 } -}
 
-append_frame :: StackFrame -> Stack -> Stack
-append_frame frame stack = stack {
-  st_branch = SB (frame : (coerce $ st_branch stack))
-}
-
-union_branches :: [StackBranch] -> StackBranch
-union_branches = mconcat
+union_stackes :: [Stack] -> Stack
+union_stackes = mconcat
 
 runIO_name :: Name
 runIO_name = mkSystemName (mkVarOccUnique $ mkFastString "runIO#") (mkVarOcc "runIO#")
