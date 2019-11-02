@@ -32,7 +32,7 @@ import Data.Map.Strict ( unionWith, unionsWith, insert, singleton, empty, fromLi
 import Control.Applicative ( liftA2 )
 
 import Ra ( pat_match, reduce_deep )
-import Ra.Lang -- ( Stack(..), SymApp(..), Sym(..), SymTable(..), PatMatchSyms(..), ReduceSyms(..), StackBranch(..), unSB, mapSB, union_sym_tables, make_stack_key )
+import Ra.Lang -- ( Stack(..), SymApp(..), Sym(..), SymTable(..), PatMatchSyms(..), ReduceSyms(..), Stack(..), unSB, mapSB, union_sym_tables, make_stack_key )
 import Ra.Extra
 
 unHsWrap :: LHsExpr GhcTc -> LHsExpr GhcTc
@@ -47,14 +47,11 @@ deapp expr =
     HsApp _ l r -> (id *** (++[r])) (deapp l)
     _ -> (unwrapped, [])
 
-bind_to_table :: Stack -> HsBind GhcTc -> [Bind]
-bind_to_table st b = case b of
+bind_to_table :: HsBind GhcTc -> [Bind]
+bind_to_table b = case b of
   AbsBinds { abs_exports, abs_binds } ->
-    let subbinds = mconcat $ bagToList $ mapBag (bind_to_table st . unLoc) abs_binds
-    in subbinds <> map (
-        VarPat NoExt . noLoc . abe_poly
-        &&& reduce_deep . ((flip (SA [] st)) []) . Sym . noLoc . HsVar NoExt . noLoc . abe_mono
-      ) abs_exports
+    let subbinds = mconcat $ bagToList $ mapBag (bind_to_table . unLoc) abs_binds -- consider making union_sym_table just Foldable t => ...
+    in subbinds <> map (VarPat NoExt . noLoc . abe_poly &&& pure . sa_from_sym . Sym . noLoc . HsVar NoExt . noLoc . abe_mono) abs_exports
     
   -- AbsBindsSig { abs_sig_export, abs_sig_bind = L _ abs_sig_bind } -> 
   --   let subbinds = bind_to_table stack abs_sig_bind
@@ -65,19 +62,11 @@ bind_to_table st b = case b of
   -------------------
   -- SYM BASE CASE --
   -------------------
-  FunBind { fun_id = fun_id, fun_matches } -> [(
-      VarPat NoExt fun_id,
-      mempty {
-        rs_syms = [SA [] st (Sym $ noLoc $ HsLam NoExt fun_matches) []]
-      }
-    )]
+  FunBind { fun_id = fun_id, fun_matches } -> [( VarPat NoExt fun_id, [sa_from_sym (Sym $ noLoc $ HsLam NoExt fun_matches) ])]
   
   PatBind { pat_lhs = L _ pat_lhs, pat_rhs } ->
-    grhs_binds st pat_rhs <> [(
-        pat_lhs,
-        mconcat $ map (reduce_deep . flip (SA [] st) [] . Sym) (grhs_exprs pat_rhs)
-      )]
-  VarBind{} -> mempty
+    grhs_binds pat_rhs <> [(pat_lhs, map (sa_from_sym . Sym) (grhs_exprs pat_rhs))]
+  VarBind {} -> mempty
   _ -> error $ constr_ppr b
 
 -- gmapQ :: Data c => (forall d. Data d => d -> e) -> c -> [e]
@@ -85,12 +74,12 @@ bind_to_table st b = case b of
 grhs_exprs :: GenericQ [LHsExpr GhcTc]
 grhs_exprs x = map (\(L _ (GRHS _ _ body) :: LGRHS GhcTc (LHsExpr GhcTc)) -> body) (concat $ shallowest cast x)
 
-grhs_binds :: Stack -> GenericQ [Bind] -- TODO consider passing more info via `GenericQ (Maybe PatMatchSyms)`, and removing the fromMaybe
-grhs_binds st = everythingBut (<>) (
+grhs_binds :: GenericQ [Bind] -- TODO consider passing more info via `GenericQ (Maybe PatMatchSyms)`, and removing the fromMaybe
+grhs_binds = everythingBut (<>) (
     (mempty, False)
-    `mkQ` ((,True) . bind_to_table st)
+    `mkQ` ((,True) . bind_to_table)
     `extQ` ((,False) . ((\case
-        BindStmt _ (L _ pat) expr _ _ -> [(pat, reduce_deep (SA [] st (Sym expr) []))]
+        BindStmt _ (L _ pat) expr _ _ -> [(pat, [sa_from_sym (Sym expr)])] -- TODO check if a fresh stack key here is the right thing to do
         _ -> mempty
       ) . unLoc :: LStmt GhcTc (LHsExpr GhcTc) -> [Bind])) -- TODO dangerous: should we really keep looking deeper after finding a BindStmt?
     `extQ` ((mempty,) . ((\case 
