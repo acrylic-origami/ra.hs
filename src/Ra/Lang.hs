@@ -123,8 +123,8 @@ type Write = SymApp
 -- instance Ord Write where
 --   (Write l_stack _) <= (Write r_stack _) = l_loc <= r_loc
   
-type Writes = Map Pipe [Write]
-type Pipe = StackKey -- LHsExpr GhcTc
+type Writes = [([Pipe], [Write])] -- TODO not my prettiest kludge: this went from unique pipe to many writes (in a Map) to non-unique pipe to many writes (`[(Pipe, [Write])]`) to this: a free-for-all relationship. All to allow `pat_match` to be generic.
+type Pipe = SymApp -- LHsExpr GhcTc
 
 data SymApp = SA {
   sa_consumers :: [StackKey],
@@ -172,10 +172,10 @@ lift_rs_syms2 f a b = (a <> b) {
 -- type PatMatchSyms = Syms (Map Id) -- can't use SymTable because partially-applied type synonyms are illegal. This trouble to keep Syms generalized is getting very close to impractical
 
 append_rs_writes ws rs = rs {
-  rs_writes = unionWith (++) (rs_writes rs) ws
+  rs_writes = ws <> (rs_writes rs)
 }
 append_pms_writes ws pms = pms {
-  pms_writes = unionWith (++) (pms_writes pms) ws
+  pms_writes = ws <> (pms_writes pms)
 }
 pms2rs pms = ReduceSyms {
   rs_syms = concat $ elems $ stbl_table $ pms_syms pms,
@@ -229,7 +229,7 @@ instance Monoid Stack where
   mappend = (<>)
 
 instance Semigroup ReduceSyms where
-  (ReduceSyms lsyms lwrites) <> (ReduceSyms rsyms  rwrites) = ReduceSyms (lsyms <> rsyms) (unionWith (++) lwrites rwrites) -- is there a nicer way to do this?
+  (ReduceSyms lsyms lwrites) <> (ReduceSyms rsyms  rwrites) = ReduceSyms (lsyms <> rsyms) (lwrites <> rwrites) -- is there a nicer way to do this?
   
   -- vs. (<>) = curry $ uncurry ReduceSyms . ((uncurry (++) . fmap rs_syms) &&& (uncurry (unionWith (++)) . fmap ss_syms))
 
@@ -239,7 +239,7 @@ instance Monoid ReduceSyms where
 
 
 instance Semigroup PatMatchSyms where
-  (PatMatchSyms lsyms lwrites) <> (PatMatchSyms rsyms rwrites) = PatMatchSyms (lsyms <> rsyms) (unionWith (++) lwrites rwrites)
+  (PatMatchSyms lsyms lwrites) <> (PatMatchSyms rsyms rwrites) = PatMatchSyms (lsyms <> rsyms) (lwrites <> rwrites)
   
 instance Monoid PatMatchSyms where
   mempty = PatMatchSyms mempty mempty

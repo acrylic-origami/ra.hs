@@ -150,7 +150,7 @@ pat_match binds =
             binder = everywhereWithContextBut (<>) (
                   unQ . (
                       f0
-                        `mkQT` (Q . Just . (mconcat *** concat) . unzip . map ((fst &&& uncurry list_alt . (rs_syms *** pure)) . (sub next_table &&& id)))
+                        `mkQT` (Q . Just . (mconcat *** concat) . unzip . map ((fst &&& uncurry list_alt . (rs_syms *** pure)) . (sub next_table &&& id)) :: [SymApp] -> Q ReduceSyms [SymApp])
                         `extQT` (const (Q Nothing) :: Stack -> Q ReduceSyms Stack)
                     )
               ) mempty
@@ -189,7 +189,7 @@ reduce syms0 =
                            }] }
             expanded = mconcat $ case sa_sym sa of
               Sym (L _ (HsVar _ v)) -> case varString $ unLoc v of
-                "newEmptyMVar" -> fromMaybe mempty (map (expand_reads ws) <$> ws !? make_stack_key sa) -- by only taking `w_sym`, encode the law that write threads are not generally the threads that read (obvious saying it out loud, but it does _look_ like we're losing information here)
+                "newEmptyMVar" -> map (expand_reads ws) $ concatMap snd $ filter ((elem sa) . fst) ws -- by only taking `w_sym`, encode the law that write threads are not generally the threads that read (obvious saying it out loud, but it does _look_ like we're losing information here)
                 "readMVar" | length m_next_args > 0 -> head m_next_args -- list of pipes from the first arg
                 _ -> []
               _ -> []
@@ -221,7 +221,7 @@ reduce syms0 =
               
             (next_pms, next_rs) = (mconcat *** mconcat) $ unzip $ map (second (expand_reads (rs_writes rs)) . update_stack) $ rs_syms rs
             next_writes = (rs_writes next_rs) <> (pms_writes next_pms)
-        in (M.null next_writes, next_rs {
+        in (null next_writes, next_rs {
             rs_writes = next_writes
           })
         
@@ -357,13 +357,8 @@ reduce_deep sa@(SA consumers stack m_sym args thread) =
               "putMVar" -> if length args' >= 2
                 then
                   let (pipes:vals:_) = args'
-                      next_writes = map (\pipe -> case sa_sym pipe of
-                          Sym (L _ (HsVar _ v)) | varString (unLoc v) == "newEmptyMVar" -> singleton (make_stack_key pipe) vals
-                          _ -> mempty
-                        ) pipes
-                  in terminal' { -- this is a bit silly atm since terminal writes are empty, but not necessarily all the time
-                      rs_writes = unionsWith (++) (rs_writes terminal : next_writes)
-                    }
+                      next_writes = [(pipes, vals)]
+                  in append_rs_writes next_writes terminal'
                 else terminal'
                 
               _ -> terminal'

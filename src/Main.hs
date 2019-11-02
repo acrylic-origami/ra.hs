@@ -49,7 +49,8 @@ module Main where
             })) syms0 -- this makes it work, but feels verrrrry sketchy modifying stacks like that; it's almost like duplicating and tacking onto this "layer"
       
       -- return $ uncurry (++) . (show *** ppr_rs (showPpr dflags)) $ reduce $ (!!1) $ catMaybes $ map (\b -> case unLoc b of { AbsBinds {} -> Just $ snd $ head $ bind_to_table st0 (unLoc b); _ -> Nothing }) $ bagToList (typecheckedSource t)
-      return $ uncurry (++) . (show *** ppr_rs (showPpr dflags)) $ reduce syms1
+      -- return $ ppr_rs (showPpr dflags) syms0
+      return $ uncurry (++) . (show *** ppr_rs (showPpr dflags)) $ reduce syms0
       -- return $ concatMap ((++"\n") . uncurry ((++) . (++" -> ")) . (showPpr dflags *** concatMap (ppr_stack (showPpr dflags) . sa_stack))) $ M.assocs $ stbl_table (pms_syms initial_pms)
       -- return $ ppr_pms (showPpr dflags) initial_pms
       -- return $ concatMap (uncurry (++) . ((showPpr dflags) *** (concatMap (ppr_sa (showPpr dflags))))) $ grhs_binds (typecheckedSource t)

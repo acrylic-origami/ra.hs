@@ -12,7 +12,7 @@ module Ra.Lang.Extra (
 import GHC ( LHsExpr, GhcTc )
 import Data.List ( intersperse )
 import Data.Bool ( bool )
-import Data.Tuple.Extra ( (&&&), (***) )
+import Data.Tuple.Extra ( (&&&), (***), both )
 
 import Ra.Lang
 
@@ -46,7 +46,7 @@ ppr_sa show' = go 0 where
           )
 
 ppr_writes :: Printer -> Writes -> String
-ppr_writes show' = concatMap ((++"\n---\n") . uncurry ((++) . (++" -> ")) . (show' *** concatMap ((++"\n") . ppr_sa show'))) . assocs
+ppr_writes show' = concatMap ((++"\n---\n") . uncurry ((++) . (++" -> ")) . (both $ concatMap ((++"\n") . ppr_sa show')))
 
 -- ppr_hold :: Printer -> Hold -> String
 -- ppr_hold show' = uncurry ((++) . (++" <- ")) . (show' . h_pat &&& ppr_sa show' . h_sym)
@@ -62,6 +62,7 @@ ppr_pms :: Printer -> PatMatchSyms -> String
 ppr_pms show' = flip concatMap printers . (("\n===\n"++).) . flip ($) where
   printers = [
       concatMap ((++"\n") . uncurry ((++) . (++" -> ")) . (show' *** concatMap ((++"\n") . ppr_sa show'))) . assocs . stbl_table . pms_syms
+      , concatMap ((++"\n") . uncurry ((++) . (++" -> ")) . (show' *** concatMap (ppr_sa show'))) . stbl_binds . pms_syms
       , ppr_writes show' . pms_writes
     ]
 
