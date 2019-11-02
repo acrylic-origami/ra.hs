@@ -175,7 +175,7 @@ pat_match binds =
       }
     }
 
-reduce :: ReduceSyms -> (Int, ReduceSyms)
+reduce :: ReduceSyms -> [ReduceSyms]
 reduce syms0 =
   let expand_reads :: Writes -> SymApp -> ReduceSyms
       expand_reads ws sa =
@@ -199,7 +199,7 @@ reduce syms0 =
         -- STACK good: relies on the pipe stack being correct
           
       
-      iterant :: ReduceSyms -> (Bool, ReduceSyms)
+      iterant :: ReduceSyms -> ReduceSyms
       iterant rs =
         let update_stack sa =
               let (next_pms', next_stack) = (mconcat *** SB) $ unzip $ map (\case
@@ -221,12 +221,12 @@ reduce syms0 =
               
             (next_pms, next_rs) = (mconcat *** mconcat) $ unzip $ map (second (expand_reads (rs_writes rs)) . update_stack) $ rs_syms rs
             next_writes = (rs_writes next_rs) <> (pms_writes next_pms)
-        in (null next_writes, next_rs {
+        in next_rs {
             rs_writes = next_writes
-          })
+          }
         
-      res = until (fst . snd) (((+1) *** iterant . snd)) (0, (False, syms0))
-  in (fst res, snd $ snd res)
+  in head $ filter (null . rs_writes . head) $ iterate (\l -> (iterant $ head l) : l) [syms0]
+  -- takeWhile (not . null . rs_writes) $ foldl (\l _ -> l ++ [iterant $ head l]) [syms0] [0..] -- interesting that this doesn't seem to be possible
 
 reduce_deep :: SymApp -> ReduceSyms
 reduce_deep sa | let args = sa_args sa
