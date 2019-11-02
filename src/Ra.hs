@@ -139,7 +139,7 @@ pat_match binds =
                   <$> (t !? v)
                 else Nothing
               _ -> Nothing
-        in snd ((t, sa), fromMaybe mempty m_next_syms)
+        in fromMaybe mempty m_next_syms
       
       iterant :: PatMatchSyms -> (Bool, PatMatchSyms)
       iterant pms =
@@ -163,7 +163,8 @@ pat_match binds =
           )
       
       (rs0, binds0) = first mconcat $ unzip $ map ((\(pat, rs) -> (rs, (pat, rs_syms rs))) . second (mconcat . map reduce_deep)) binds -- [(Pat, ReduceSyms)] => [(ReduceSyms, (Pat, [SymApp]))] => ([ReduceSyms], [(Pat, SymApp)])
-      (_, pmsn) = until fst (iterant . snd) (False, mempty {
+      (_, pmsn) = until fst (iterant . snd) (False, PatMatchSyms {
+            pms_writes = rs_writes rs0,
             pms_syms = mempty {
               stbl_binds = binds0
             }
@@ -171,8 +172,7 @@ pat_match binds =
     in pmsn {
       pms_syms = (pms_syms pmsn) {
         stbl_table = pat_match_many (stbl_binds $ pms_syms pmsn)
-      },
-      pms_writes = pms_writes pmsn <> rs_writes rs0
+      }
     }
 
 reduce :: ReduceSyms -> (Int, ReduceSyms)
