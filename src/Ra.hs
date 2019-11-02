@@ -348,8 +348,7 @@ reduce_deep sa@(SA consumers stack m_sym args thread) =
                         ) o
                 
               "forkIO" | to_fork:[] <- args' ->
-                  let this_thread = (getLoc sym, stack)
-                      result = mconcat $ map (everywhereBut (False `mkQ` (const True :: Stack -> Bool)) (mkT $ \sa' -> sa' { sa_thread = this_thread }) . reduce_deep) to_fork
+                  let result = mconcat $ map (everywhereBut (False `mkQ` (const True :: Stack -> Bool)) (mkT $ \sa' -> sa' { sa_thread = Just sa }) . reduce_deep) to_fork
                   in result {
                       rs_syms = [error "Using the ThreadID from forkIO is not yet supported."]
                     }

@@ -12,6 +12,7 @@ module Ra.Lang.Extra (
 import GHC ( LHsExpr, GhcTc )
 import Data.List ( intersperse )
 import Data.Bool ( bool )
+import Data.Maybe ( fromMaybe )
 import Data.Tuple.Extra ( (&&&), (***), both )
 
 import Ra.Lang
@@ -35,12 +36,15 @@ ppr_sa show' = go 0 where
                   &&& ((indent ++ "<")++) . (show' . sa_sym)
                 )
               &&& uncurry (++) . (
-                  ("*"++) . (++"*") . concatMap (
+                  concatMap (
                       (++("\n" ++ indent ++ " )\n"))
                       . (("\n" ++ indent ++ " (\n")++)
                       . concatMap (go (n+1))
                     ) . sa_args
-                  &&& show' . make_stack_key
+                  &&& uncurry (++) . (
+                      show' . make_stack_key
+                      &&& fromMaybe "BASE" . fmap (show' . make_stack_key) . sa_thread
+                    )
                 )
             )
           )

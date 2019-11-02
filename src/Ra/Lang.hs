@@ -112,7 +112,7 @@ instance Monoid SymTable where
   mappend = (<>)
 
 type StackKey = [SrcSpan]
-type Thread = (Stack, Stack)
+type Thread = SymApp
 -- data ThreadKey = TKNormal StackKey | TKEnemy -- ThreadKey is specialized so only the stack above the latest forkIO call is included
 type Write = SymApp
 
@@ -134,10 +134,10 @@ data SymApp = SA {
     -- 2. if a term goes through multiple consumers, they're all tracked for races individually
   sa_sym :: Sym,
   sa_args :: [[SymApp]],
-  sa_thread :: (SrcSpan, Stack) -- TODO consider a more elegant type
+  sa_thread :: Maybe SymApp -- TODO consider a more elegant type
 } deriving (Data, Typeable) -- 2D tree. Too bad we can't use Tree; the semantics are totally different
 
-sa_from_sym s = SA mempty mempty s mempty (noSrcSpan, mempty)
+sa_from_sym s = SA mempty mempty s mempty Nothing
 
 instance Eq SymApp where
   (==) = curry $ flip all preds . flip ($) where
