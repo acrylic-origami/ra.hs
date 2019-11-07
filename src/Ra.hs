@@ -1,4 +1,4 @@
-{-# LANGUAGE NamedFieldPuns, LambdaCase, TupleSections, MultiWayIf, DeriveDataTypeable #-}
+{-# LANGUAGE Rank2Types, NamedFieldPuns, LambdaCase, TupleSections, MultiWayIf, DeriveDataTypeable #-}
 module Ra (
   pat_match,
   reduce_deep,
@@ -6,7 +6,9 @@ module Ra (
 ) where
 
 import GHC
-import DataCon ( dataConName )
+import HsExtension ( XOverLit(..) )
+import Type ( mkFunTys, mkAppTy, mkAppTys, splitFunTys, getTyVar_maybe, dropForAlls )
+import DataCon ( dataConName, dataConRepType )
 import TyCon ( tyConName )
 import ConLike ( ConLike (..) )
 import Name ( mkSystemName, nameOccName )
@@ -14,7 +16,7 @@ import OccName ( mkVarOcc, occNameString )
 import Unique ( mkVarOccUnique )
 import FastString ( mkFastString ) -- for WildPat synthesis
 import SrcLoc ( noSrcSpan )
-import Var ( mkLocalVar ) -- for WildPat synthesis
+import Var ( mkLocalVar, varType, setVarType ) -- for WildPat synthesis
 import IdInfo ( vanillaIdInfo, IdDetails(VanillaId) ) -- for WildPat synthesis
 
 import Data.List ( elemIndex )
@@ -22,15 +24,15 @@ import Data.Bool ( bool )
 import Data.Coerce ( coerce )
 import Data.Char ( isLower )
 import Data.Tuple ( swap )
-import Data.Tuple.Extra ( first, second, (***), (&&&), both )
+import Control.Arrow ( first, second, (***), (&&&) )
 import Data.Function ( (&) )
 import Data.Maybe ( catMaybes, fromMaybe, maybeToList, isNothing )
 import Data.Data ( toConstr, Data(..), Typeable(..) )
-import Data.Generics ( everywhereBut, mkQ, mkT, extQ )
+import Data.Generics ( everywhere, everywhereBut, GenericT(), mkQ, mkT, extQ, extT )
 import Data.Generics.Extra ( constr_ppr, everywhereWithContextBut, extQT, mkQT )
 import Data.Semigroup ( (<>) )
 import Data.Monoid ( mempty, mconcat )
-import Control.Monad ( guard, foldM )
+import Control.Monad ( join, guard, foldM )
 import Control.Applicative ( (<|>), liftA2 )
 import Control.Exception ( assert )
 
@@ -41,7 +43,8 @@ import qualified Data.Set as S ( fromList, member, insert )
 -- import qualified Data.Set as S ( insert )
 
 import qualified Ra.Refs as Refs
-import {-# SOURCE #-} Ra.GHC
+import Ra.GHC.Translate
+import Ra.GHC.Util
 import Ra.Lang
 import Ra.Extra
 import Ra.Lang.Extra
@@ -66,7 +69,7 @@ pat_match_one ::
 pat_match_one pat sa =
   case pat of
     ---------------------------------
-    -- *** UNWRAPPING PATTERNS *** --
+    -- +++ UNWRAPPING PATTERNS +++ --
     ---------------------------------
     WildPat ty -> Just mempty -- TODO check if this is the right [write, haha] behavior
       
@@ -90,7 +93,7 @@ pat_match_one pat sa =
         -- TODO test this: the outer binding and inner pattern are related: the inner pattern must succeed for the outer one to as well.
         
     -------------------------------
-    -- *** MATCHING PATTERNS *** --
+    -- +++ MATCHING PATTERNS +++ --
     -------------------------------
     TuplePat _ pats _ | TupleConstr _ <- sa_sym sa -> pat_match_zip (map unLoc pats) (sa_args sa)
                       | otherwise -> mempty -- error $ "Argument on explicit tuple. Perhaps a tuple section, which isn't supported yet. PPR:\n" ++ (ppr_sa ppr_unsafe sa)
@@ -121,9 +124,10 @@ pat_match :: [Bind] -> PatMatchSyms
 pat_match binds = 
   let sub :: Map Id [SymApp] -> SymApp -> ReduceSyms
       sub t sa = -- assumes incoming term is a normal form
-        let m_next_syms :: Maybe ReduceSyms
-            m_next_syms = case sa_sym sa of
-              Sym (L _ (HsVar _ (L _ v))) -> if not $ v `elem` (var_ref_tail $ sa_stack sa)
+        let subbed_sa = sub_sa_types_wo_stack sa sa -- really hope this works
+            m_next_syms :: Maybe ReduceSyms
+            m_next_syms = case sa_sym subbed_sa of
+              Sym (L _ (HsVar _ (L _ v))) -> if not $ v `elem` (var_ref_tail $ sa_stack subbed_sa)
                 then (
                       mconcat
                       -- . map (\rs' ->
@@ -132,25 +136,24 @@ pat_match binds =
                       . map (\sa' ->
                           reduce_deep $ sa' {
                             sa_stack = mapSB ((VarRefFrame v):) (sa_stack sa'),
-                            sa_args = (sa_args sa') <> (sa_args sa)
+                            sa_args = (sa_args sa') <> (sa_args subbed_sa)
                           }
                         )
                     )
-                  <$> (t !? v)
+                  <$> (table_lookup v t)
                 else Nothing
               _ -> Nothing
         in fromMaybe mempty m_next_syms
       
       iterant :: PatMatchSyms -> (Bool, PatMatchSyms)
       iterant pms =
-        -- BOOKMARK not working becuase of effed ordering of write substitution: should pass in PatMatchSyms and use the binds within the SymTable within that, so we can also substitute on writes
         let f0 :: Data b => b -> Q ReduceSyms b
             f0 b = Q $ Just (mempty, b)
             next_table = pat_match_many (stbl_binds $ pms_syms pms) -- even if all the matches failed, we might've made new writes which might make some matches succeed
             binder = everywhereWithContextBut (<>) (
                   unQ . (
                       f0
-                        `mkQT` (Q . Just . (mconcat *** concat) . unzip . map ((fst &&& uncurry list_alt . (rs_syms *** pure)) . (sub next_table &&& id)) :: [SymApp] -> Q ReduceSyms [SymApp])
+                        `mkQT` (Q . Just . (mconcat *** concat) . unzip . map ((fst &&& uncurry list_alt . (rs_syms *** pure)) . (sub next_table &&& id)))
                         `extQT` (const (Q Nothing) :: Stack -> Q ReduceSyms Stack)
                     )
               ) mempty
@@ -182,9 +185,7 @@ reduce syms0 =
         let m_next_args = map (map (\sa' ->
                 lift_rs_syms2 list_alt (expand_reads ws sa') (mempty { rs_syms = [sa'] })
               )) (sa_args sa)
-            next_argd_sym -- | all null m_next_args = []
-                          -- | otherwise =
-                          = mempty { rs_syms = [sa {
+            next_argd_sym = mempty { rs_syms = [sa {
                              sa_args = map (concatMap rs_syms) m_next_args
                            }] }
             expanded = mconcat $ case sa_sym sa of
@@ -228,6 +229,77 @@ reduce syms0 =
   in head $ filter (null . rs_writes . head) $ iterate (\l -> (iterant $ head l) : l) [syms0]
   -- takeWhile (not . null . rs_writes) $ foldl (\l _ -> l ++ [iterant $ head l]) [syms0] [0..] -- interesting that this doesn't seem to be possible
 
+-- app_types :: Type -> Type -> Type
+-- app_types l r = uncurry mkFunTys $ first (update_head (const r)) $ splitFunTys l
+
+get_mg_type :: MatchGroup GhcTc (LHsExpr GhcTc) -> Type
+get_mg_type mg = uncurry mkFunTys $ (mg_arg_tys &&& mg_res_ty) $ mg_ext mg -- questioning why they didn't just give us a FunTy...
+
+get_type :: SymApp -> Type -- FYI this is the type _after_ reduction; i.e. apps and sections go down an arity, OpApps go down two. The law: this preserves types of all terminal symbols (see HsLam[Case], HsVar, Hs[Over]Lit, ExplicitTuple, ExplicitList)
+get_type sa =
+  let get_expr_type = get_type . sa_from_sym . Sym
+  in case sa_sym sa of
+    Sym sym -> case unLoc sym of
+      -- TERMINAL SYMBOLS
+      HsLamCase _ mg -> get_mg_type mg
+      HsLam _ mg -> get_mg_type mg
+      HsVar _ (L _ v) -> varType v
+      HsOverLit _ _ -> blank_type
+      -- HsLit _ 
+      ExplicitTuple _ args _ -> mkAppTys (error "Report this bug: too lazy to make actual Tuple TyCon.") (map (\case
+            L _ (Present _ expr) -> get_expr_type expr
+            _ -> error "Tuple sections not yet supported"
+          ) args)
+      ExplicitList ty _ _ -> ty
+      HsConLikeOut _ (RealDataCon con) -> dataConRepType con -- TODO what's a PatSynCon again?
+      
+      -- NON-TERMINAL SYMBOLS
+      -- NOTE: none of these should actually ever be called, because we should always have normal forms at instance resolution
+      HsApp _ l _ -> uncurry mkFunTys $ first tail $ splitFunTys $ get_expr_type l
+      OpApp _ _ op _ -> uncurry mkFunTys $ first (tail . tail) $ splitFunTys $ get_expr_type op
+      HsWrap _ _ expr -> get_expr_type $ L (getLoc sym) expr
+      NegApp _ expr _ -> get_expr_type expr
+      HsPar _ expr -> get_expr_type expr
+      SectionL _ _ op -> uncurry mkFunTys $ first tail $ splitFunTys $ get_expr_type op
+      SectionR _ _ op -> uncurry mkFunTys $ first (uncurry (:) . (head &&& tail . tail)) $ splitFunTys $ get_expr_type op
+      HsCase _ _ mg -> get_mg_type mg
+      HsIf _ _ _ a _b -> get_expr_type a -- assume a ~ _b
+      HsMultiIf ty _ -> ty
+      HsLet _ _ ret -> get_expr_type ret
+      HsDo ty _ _ -> ty
+      
+    TupleConstr _ -> mkAppTys (error "Report this bug: too lazy to make actual Tuple TyCon.") (map (get_type . head) (sa_args sa))
+    ListConstr _ -> mkAppTy (error "Report this bug: too lazy to make actual list TyCon.") (get_type $ head $ head $ sa_args sa)
+    EntryPoint -> error "Tried to get the type of EntryPoint"
+
+sub_sa_types_T :: SymApp -> GenericT
+sub_sa_types_T sa =
+  let sa_ty = get_type sa
+      -- TODO URGENT rip through all "wrappers" (foralls and contexts) to get to the true return type, assuming a saturated application... which is wrong for unsaturated cases. Instead, it really should be an argument-by-argument decomp, which suggests we should write a function that deapps in type space
+      sa_fun_ret_ty = dig_ret_ty sa_ty where
+        dig_ret_ty ty =
+          let (arg_tys, rhs) = splitFunTys $ dropForAlls ty
+          in if null $ arg_tys
+            then rhs -- drop forall
+            else dig_ret_ty rhs
+      type_map = fromMaybe mempty $ inst_subty sa_ty (mkFunTys (map (reduce_types . head) (sa_args sa)) sa_fun_ret_ty) -- beta-reduce all types in the left-hand sides
+      tx :: GenericT
+      tx = mkT (
+          (\x ->
+              fromMaybe x (join $ fmap (type_map!?) $ getTyVar_maybe x)
+            ) -- DEBUG
+        )
+  in snd (sa, tx `extT` ((\expr -> case expr of -- DEBUG
+      L vloc (HsVar x (L loc v)) -> L vloc (HsVar x (L loc (setVarType v (everywhere tx $ varType v)))) -- DEBUG
+      _ -> expr
+    ) :: LHsExpr GhcTc -> LHsExpr GhcTc))
+
+sub_sa_types_wo_stack :: SymApp -> GenericT
+sub_sa_types_wo_stack sa = everywhereBut (False `mkQ` (const True :: Stack -> Bool)) (sub_sa_types_T sa)
+  
+reduce_types :: SymApp -> Type
+reduce_types sa = uncurry mkFunTys $ everywhere (sub_sa_types_T sa) $ first (drop (length $ sa_args sa)) $ splitFunTys $ dropForAlls $ get_type sa
+
 reduce_deep :: SymApp -> ReduceSyms
 reduce_deep sa | let args = sa_args sa
                      sym = sa_sym sa
@@ -236,7 +308,7 @@ reduce_deep sa@(SA consumers stack m_sym args thread) =
   -------------------
   -- SYM BASE CASE --
   -------------------
-  let terminal = mempty { rs_syms = [sa] }
+  let terminal = mempty { rs_syms = [ sa ] }
       
       unravel1 :: LHsExpr GhcTc -> [[LHsExpr GhcTc]] -> ReduceSyms -- peeling back wrappings; consider refactor to evaluate most convenient type to put here
       unravel1 target new_args =
@@ -262,7 +334,7 @@ reduce_deep sa@(SA consumers stack m_sym args thread) =
       HsLam _ mg | let loc = getLoc $ mg_alts mg -- <- NB this is why the locations of MatchGroups don't matter
                  , not $ is_visited stack sa -> -- beware about `noLoc`s showing up here: maybe instead break out the pattern matching code
                   if matchGroupArity mg > length args
-                    then terminal
+                    then terminal -- note this is the only place where 
                     else
                       let next_binds :: [Bind]
                           next_binds = concatMap ( -- over function body alternatives
@@ -275,7 +347,7 @@ reduce_deep sa@(SA consumers stack m_sym args thread) =
                               pms_syms = next_explicit_binds,
                               pms_writes = bind_writes
                             }) = pat_match $ grhs_binds mg -- STACK questionable: do we need the new symbol here? Shouldn't it be  -- localize binds correctly via pushing next stack location
-                          next_exprs = grhs_exprs $ map (grhssGRHSs . m_grhss . unLoc) $ unLoc $ mg_alts mg
+                          next_exprs = sub_sa_types_wo_stack sa $ grhs_exprs $ map (grhssGRHSs . m_grhss . unLoc) $ unLoc $ mg_alts mg
                           next_frame = AppFrame sa (SymTable {
                               stbl_table = next_pat_matches,
                               stbl_binds = next_binds
@@ -312,7 +384,7 @@ reduce_deep sa@(SA consumers stack m_sym args thread) =
              | varString v == "debug#" ->
                 -- DEBUG SYMBOL
                 mempty
-             | Just left_syms <- stack_var_lookup True v stack -> -- this absolutely sucks, we have to use the "soft" search because instance name Uniques are totally unusable. Can't even use `Name`, unless I convert to string every time... which I might need to do in the future for performance reasons if I can't come up with a solution for this. 
+             | Just left_syms <- stack_var_lookup v stack ->  -- TODO URGENT look out for shadowed declarations of other types that don't match (e.g. might have same arity but subtly incompatible types somehow)
               mconcat $ map (\sa' ->
                   reduce_deep sa' { -- TODO: check if `reduce_deep` is actually necessary here; might not be because we expect the symbols in the stack to be resolved
                     sa_args = sa_args sa' ++ args', -- ARGS good: elements in the stack are already processed, so if their args are okay these ones are okay
@@ -321,7 +393,7 @@ reduce_deep sa@(SA consumers stack m_sym args thread) =
                 ) left_syms
              | otherwise -> case varString v of
               ------------------------------------
-              -- *** SPECIAL CASE FUNCTIONS *** --
+              -- +++ SPECIAL CASE FUNCTIONS +++ --
               ------------------------------------
               
               -- "newEmptyMVar" -> -- return as terminal and identify above
@@ -377,7 +449,7 @@ reduce_deep sa@(SA consumers stack m_sym args thread) =
                           let L _ (HsVar _ op) = unHsWrap m_op
                               nf_arg1_syms = reduce_deep sa { sa_sym = Sym v, sa_args = [] }
                               arg0:args_rest = args
-                          in case stack_var_lookup True (unLoc op) stack of
+                          in case stack_var_lookup (unLoc op) stack of
                             Just stack_exprs ->
                               mappend nf_arg1_syms { rs_syms = [] } $ mconcat $ map (\sa' ->
                                 reduce_deep $ sa' {
@@ -432,7 +504,7 @@ reduce_deep sa@(SA consumers stack m_sym args thread) =
           sa_sym = TupleConstr (getLoc sym),
           sa_args = args'
         })
-      ExplicitSum _ _ _ _ -> terminal
+      -- ExplicitSum _ _ _ _ -> terminal
       ExplicitList _ _ args ->
         let (next_rs, args') = first mconcat $ unzip $ map (\s ->
                 (id &&& rs_syms) $ reduce_deep $ sa {

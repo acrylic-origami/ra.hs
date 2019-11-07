@@ -1,51 +1,19 @@
-{-# LANGUAGE Rank2Types, ScopedTypeVariables, LambdaCase, TupleSections, NamedFieldPuns #-}
-module Ra.GHC (
-  deapp,
-  unHsWrap,
-  grhs_exprs,
+{-# LANGUAGE Rank2Types, LambdaCase, TupleSections, NamedFieldPuns #-}
+module Ra.GHC.Translate (
   grhs_binds,
   bind_to_table,
-  mg_drop,
-  mg_flip,
-  varString,
-  varTyConName
 ) where
 
 import GHC
-import qualified GHC ( TyCon )
-import qualified TyCon as GHCTyCon ( tyConName )
-import Type ( tyConAppTyConPicky_maybe )
-import Var ( varName, varType )
-import Name ( mkSystemName, nameOccName )
-import OccName ( mkVarOcc, occNameString )
-import Bag
+import Bag ( bagToList, mapBag )
 
-import Data.Generics ( Data(..), everythingBut, GenericQ, cast, mkQ, extQ, gmapQ )
+import Data.Generics ( GenericQ, mkQ, extQ, everythingBut)
 import Data.Generics.Extra ( shallowest, constr_ppr )
-import Data.Bool ( bool )
-import Data.Tuple.Extra ( first, second, (&&&), (***) )
-import Data.Maybe ( catMaybes, fromMaybe )
-import Data.Monoid ( mempty, mconcat )
-import Data.Semigroup ( (<>) )
-import Data.Map.Strict ( unionWith, unionsWith, insert, singleton, empty, fromList, (!?) )
+import Control.Arrow ( (&&&) )
 
-import Control.Applicative ( liftA2 )
-
-import Ra ( pat_match, reduce_deep )
 import Ra.Lang -- ( Stack(..), SymApp(..), Sym(..), SymTable(..), PatMatchSyms(..), ReduceSyms(..), Stack(..), unSB, mapSB, union_sym_tables, make_stack_key )
+import Ra.GHC.Util ( grhs_exprs )
 import Ra.Extra
-
-unHsWrap :: LHsExpr GhcTc -> LHsExpr GhcTc
-unHsWrap expr = case unLoc expr of
-  HsWrap _ _ v -> unHsWrap (fmap (const v) expr)
-  _ -> expr
-
-deapp :: LHsExpr GhcTc -> (LHsExpr GhcTc, [LHsExpr GhcTc])
-deapp expr =
-  let unwrapped = unHsWrap expr
-  in case unLoc unwrapped of
-    HsApp _ l r -> (id *** (++[r])) (deapp l)
-    _ -> (unwrapped, [])
 
 bind_to_table :: HsBind GhcTc -> [Bind]
 bind_to_table b = case b of
@@ -71,8 +39,6 @@ bind_to_table b = case b of
 
 -- gmapQ :: Data c => (forall d. Data d => d -> e) -> c -> [e]
 -- uncurried: Data c => ((forall d. Data d => d -> e), c) -> [e]
-grhs_exprs :: GenericQ [LHsExpr GhcTc]
-grhs_exprs x = map (\(L _ (GRHS _ _ body) :: LGRHS GhcTc (LHsExpr GhcTc)) -> body) (concat $ shallowest cast x)
 
 grhs_binds :: GenericQ [Bind] -- TODO consider passing more info via `GenericQ (Maybe PatMatchSyms)`, and removing the fromMaybe
 grhs_binds = everythingBut (<>) (
@@ -89,21 +55,7 @@ grhs_binds = everythingBut (<>) (
     ) :: HsExpr GhcTc -> Bool)) -- guard against applications and lambdas, which introduce bindings we need to dig into a scope to bind
   )
 
-mg_rearg :: (forall a. [a] -> [a]) -> MatchGroup GhcTc (LHsExpr GhcTc) -> MatchGroup GhcTc (LHsExpr GhcTc)
-mg_rearg f mg = mg {
-  mg_alts = (map ((\match -> match { m_pats = f (m_pats match) })<$>)
-    ) <$> mg_alts mg
-  , mg_ext = (mg_ext mg) {
-      mg_arg_tys = f $ mg_arg_tys $ mg_ext mg
-    }
-}
-
-mg_drop x = mg_rearg $ drop x
-
-mg_flip = mg_rearg (\(a:b:ns) -> b:a:ns)
-
-varString = occNameString . nameOccName . varName
-varTyConName = fmap (occNameString . nameOccName . GHCTyCon.tyConName) . tyConAppTyConPicky_maybe . snd . splitForAllTys . varType
+-- data TyComp = SUBTY | SUPERTY | NOCOMP
 
 -- instance Applicative (GenLocated a) where
 --   pure = L noLoc

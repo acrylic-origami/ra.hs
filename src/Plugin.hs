@@ -21,7 +21,8 @@ module Plugin (frontendPlugin) where
   import Control.Monad ( mzero )
   
   import Ra ( pat_match, reduce, reduce_deep )
-  import Ra.GHC ( bind_to_table, grhs_binds, varString )
+  import Ra.GHC.Translate ( bind_to_table, grhs_binds )
+  import Ra.GHC.Util ( varString )
   import Ra.Lang -- ( SymTable, Sym(..), SymApp(..), Stack(..), unSB, Stack(..), ReduceSyms(..), PatMatchSyms(..), Write(..) )
   import Ra.Lang.Extra
 

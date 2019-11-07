@@ -2,9 +2,11 @@ module Ra.Extra (
   update_head,
   zipAll,
   list_alt,
-  map_alt
+  map_alt,
+  both
 ) where
   import qualified Data.Map.Strict as M
+  import Control.Arrow ( (***) )
   
   update_head :: (a -> a) -> [a] -> [a]
   update_head f (x:xs) = (f x):xs
@@ -27,3 +29,5 @@ module Ra.Extra (
   map_alt :: M.Map k v -> M.Map k v -> M.Map k v
   map_alt a b | M.null a = b
               | otherwise = a
+  
+  both f = (f *** f)

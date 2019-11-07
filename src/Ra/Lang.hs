@@ -10,6 +10,7 @@ module Ra.Lang (
   unSB,
   mapSB,
   stack_var_lookup,
+  table_lookup,
   make_stack_key,
   -- make_thread_key,
   var_ref_tail,
@@ -49,18 +50,19 @@ import Var ( mkLocalVar )
 import IdInfo ( vanillaIdInfo, IdDetails(VanillaId) )
 
 import Data.Data ( Data(..), Typeable(..) )
-import Data.Tuple.Extra ( second, both, (***), (&&&) )
+import Control.Arrow ( second, (***), (&&&) )
 import Data.Coerce ( coerce )
 import Data.Map.Strict ( Map(..), empty, union, unionWith, unionsWith, toList, fromList, (!?), filterWithKey, elems )
 import qualified Data.Map.Strict as M ( map )
 import Data.Set ( Set(..) )
 import Data.Semigroup ( Semigroup(..), (<>) )
 import Data.Monoid ( Monoid(..), mempty, mconcat )
-import Data.Maybe ( listToMaybe, catMaybes )
+import Data.Maybe ( listToMaybe, catMaybes, isJust )
 import Control.Applicative ( (<|>) )
 import Control.Exception ( assert )
 
-import Ra.Extra ( update_head, zipAll )
+import Ra.Extra ( update_head, zipAll, both )
+import Ra.GHC.Util
 
 -- Note about making SymTables from bindings: `Fun` needs to be lifted to `HsExpr` through the `HsLam` constructor. This is to unify the type of the binding to `HsExpr` while retaining MatchGroup which is necessary at HsApp on a named function.
 
@@ -293,25 +295,30 @@ var_ref_tail = var_ref_tail' . unSB where
   var_ref_tail' ((VarRefFrame v):rest) = v:(var_ref_tail' rest)
   var_ref_tail' _ = []
 
-stack_var_lookup :: Bool -> Id -> Stack -> Maybe [SymApp]
-stack_var_lookup soft v = foldr (\case
-    AppFrame { af_syms } -> (<|>(pick $ stbl_table af_syms))
+table_lookup :: Id -> Map Id [SymApp] -> Maybe [SymApp]
+table_lookup v tbl = uncurry (<|>) $ (
+    (!?v)
+    &&& listToMaybe . elems . filterWithKey (\q ->
+        const $ uncurry (&&) $ (
+            (==(varString v)) . varString
+            &&& isJust . flip inst_subty (varType v) . varType
+          ) q
+      )
+  ) tbl
+
+stack_var_lookup :: Id -> Stack -> Maybe [SymApp]
+stack_var_lookup v = foldr (\case
+    AppFrame { af_syms } -> (<|>(table_lookup v (stbl_table af_syms)))
     _ -> id
-  ) Nothing . unSB where
-    pick = if soft
-      then listToMaybe . elems . filterWithKey (const . uncurry (&&) . ((==(varName v)) . varName &&& (eqType (varType v)) . varType))
-      else (!?v)
+  ) Nothing . unSB
 
 update_head_table :: SymTable -> Stack -> Stack
 update_head_table next_table st = undefined {- mapSB update_head (second (uncurry (<>) . (,next_table))) st
 } -}
 
-union_stackes :: [Stack] -> Stack
-union_stackes = mconcat
-
 runIO_name :: Name
 runIO_name = mkSystemName (mkVarOccUnique $ mkFastString "runIO#") (mkVarOcc "runIO#")
 runIO_expr :: LHsExpr GhcTc
-runIO_expr = undefined -- HsVar $ noLoc $ mkLocalVar VanillaId runIO_name (error "Boilerplate to write runIO#'s type in GHC-land not yet written") vanillaIdInfo
+runIO_expr = undefined -- HsVar $ 
 -- union_sym_tables :: [SymTable] -> SymTable
 -- union_sym_tables = unionsWith (++) . map coerce -- TODO check if we need to be more sophisticated than this crude merge

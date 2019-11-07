@@ -13,7 +13,7 @@ import GHC ( LHsExpr, GhcTc )
 import Data.List ( intersperse )
 import Data.Bool ( bool )
 import Data.Maybe ( fromMaybe )
-import Data.Tuple.Extra ( (&&&), (***), both )
+import Control.Arrow ( (&&&), (***) )
 
 import Ra.Lang
 
@@ -50,7 +50,8 @@ ppr_sa show' = go 0 where
           )
 
 ppr_writes :: Printer -> Writes -> String
-ppr_writes show' = concatMap ((++"\n---\n") . uncurry ((++) . (++" -> ")) . (both $ concatMap ((++"\n") . ppr_sa show')))
+ppr_writes show' = concatMap ((++"\n---\n") . uncurry ((++) . (++" -> ")) . (both $ concatMap ((++"\n") . ppr_sa show'))) where
+  both f = (f *** f)
 
 -- ppr_hold :: Printer -> Hold -> String
 -- ppr_hold show' = uncurry ((++) . (++" <- ")) . (show' . h_pat &&& ppr_sa show' . h_sym)
