@@ -1,4 +1,5 @@
 .DS_Store
 dist/
-*.hi
-*.o
+*.hi*
+*.o*
+*.nohs*
