@@ -257,7 +257,7 @@ get_type sa =
       HsLam _ mg -> get_mg_type mg
       HsVar _ (L _ v) -> varType v
       HsOverLit _ _ -> blank_type
-      -- HsLit _ 
+      HsLit _ _ -> blank_type
       ExplicitTuple _ args _ -> mkAppTys (error "Report this bug: too lazy to make actual Tuple TyCon.") (map (\case
             L _ (Present _ expr) -> get_expr_type expr
             _ -> error "Tuple sections not yet supported"
@@ -267,18 +267,24 @@ get_type sa =
       
       -- NON-TERMINAL SYMBOLS
       -- NOTE: none of these should actually ever be called, because we should always have normal forms at instance resolution
-      HsApp _ l _ -> uncurry mkFunTys $ first tail $ splitFunTys $ get_expr_type l
-      OpApp _ _ op _ -> uncurry mkFunTys $ first (tail . tail) $ splitFunTys $ get_expr_type op
+      HsApp _ l _ -> uncurry mkFunTys $ first tail $ splitFunTys $ dropForAlls $ get_expr_type l
+      OpApp _ _ op _ -> uncurry mkFunTys $ first (tail . tail) $ splitFunTys $ dropForAlls $ get_expr_type op
       HsWrap _ _ expr -> get_expr_type $ L (getLoc sym) expr
       NegApp _ expr _ -> get_expr_type expr
       HsPar _ expr -> get_expr_type expr
-      SectionL _ _ op -> uncurry mkFunTys $ first tail $ splitFunTys $ get_expr_type op
-      SectionR _ _ op -> uncurry mkFunTys $ first (uncurry (:) . (head &&& tail . tail)) $ splitFunTys $ get_expr_type op
+      SectionL _ _ op -> uncurry mkFunTys $ first tail $ splitFunTys $ dropForAlls $ get_expr_type op
+      SectionR _ op _ ->
+        let op_ty = get_expr_type op
+            (arg_tys, res_ty) = splitFunTys $ dropForAlls op_ty
+        in if length arg_tys > 0
+          then mkFunTys (uncurry (:) $ (head &&& tail . tail) arg_tys) res_ty
+          else error $ (ppr_unsafe op_ty ++ "\n---\n" ++ constr_ppr op_ty)
       HsCase _ _ mg -> get_mg_type mg
       HsIf _ _ _ a _b -> get_expr_type a -- assume a ~ _b
       HsMultiIf ty _ -> ty
       HsLet _ _ ret -> get_expr_type ret
       HsDo ty _ _ -> ty
+      _ -> error $ constr_ppr sym
       
     TupleConstr _ -> mkAppTys (error "Report this bug: too lazy to make actual Tuple TyCon.") (map (get_type . head) (sa_args sa))
     ListConstr _ -> mkAppTy (error "Report this bug: too lazy to make actual list TyCon.") (get_type $ head $ head $ sa_args sa)

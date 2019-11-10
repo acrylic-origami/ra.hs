@@ -1,5 +1,6 @@
 module J where
   import Control.Concurrent.MVar
+  import C.Union
   type Consumer x = x -> x
   
   foo = do
@@ -8,4 +9,4 @@ module J where
     readMVar x
   
   bar :: Consumer a
-  bar x = x
+  bar = id
