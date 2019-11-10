@@ -334,7 +334,7 @@ reduce_deep sa@(SA consumers stack m_sym args thread) =
           -- STACK good: inherit from ambient application; if this ends up being an application, reduce_deep will update the stack accordingly
           -- CONSUMERS good: consumed law that distributes over unwrapping
           sa_sym = Sym target,
-          sa_args = map (concatMap rs_syms) nf_new_args_syms
+          sa_args = (map (concatMap rs_syms) nf_new_args_syms) <> (sa_args sa)
           -- CONSUMERS good: `consumers` property at least distributes over App; if the leftmost var is of type `Consumer`, then it might make some args `consumed` as well.
         }
       
@@ -459,7 +459,7 @@ reduce_deep sa@(SA consumers stack m_sym args thread) =
       -----------------------
       
       OpApp _ l_l l_op l_r -> unravel1 l_op [[l_l], [l_r]]
-      HsWrap _ _ v -> unravel1 (const v <$> sym) [] -- why is HsWrap wrapping a bare HsExpr?! No loc? Inferred from surroundings I guess (like this)
+      HsWrap _ _ v -> unravel1 (v <$ sym) [] -- why is HsWrap wrapping a bare HsExpr?! No loc? Inferred from surroundings I guess (like this)
       ExprWithTySig _ v -> unravel1 v []
       HsAppType _ v -> unravel1 v []
       NegApp _ v _ -> unravel1 v []
