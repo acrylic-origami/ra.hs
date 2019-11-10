@@ -99,7 +99,7 @@ getSymLoc EntryPoint = noSrcSpan
 --     expr = f $ expr sym
 --   }
   
-type Bind = (Pat GhcTc, [SymApp])
+type Bind = (LPat GhcTc, [SymApp])
 data SymTable = SymTable {
   stbl_table :: Map Id [SymApp], -- strictly speaking, binds => table always, but it's so expensive both performance-wise and in code, so memoization does something good here
   stbl_binds :: [Bind]

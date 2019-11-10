@@ -51,7 +51,7 @@ import Ra.Lang.Extra
 import Ra.Refs ( write_funs, read_funs )
 
 pat_match_zip ::
-  [Pat GhcTc]
+  [LPat GhcTc]
   -> [[SymApp]]
   -> Maybe (Map Id [SymApp])
 pat_match_zip pats args =
@@ -63,20 +63,20 @@ pat_match_zip pats args =
     ) mempty $ zip pats args
 
 pat_match_one ::
-  Pat GhcTc
+  LPat GhcTc
   -> SymApp
   -> Maybe (Map Id [SymApp])
 pat_match_one pat sa =
-  case pat of
+  case unLoc pat of
     ---------------------------------
     -- +++ UNWRAPPING PATTERNS +++ --
     ---------------------------------
     WildPat ty -> Just mempty -- TODO check if this is the right [write, haha] behavior
       
     -- Wrappers --
-    LazyPat _ (L _ pat) -> pat_match_one pat sa
-    ParPat _ (L _ pat) -> pat_match_one pat sa
-    BangPat _ (L _ pat) -> pat_match_one pat sa
+    LazyPat _ pat' -> pat_match_one pat' sa
+    ParPat _ pat' -> pat_match_one pat' sa
+    BangPat _ pat' -> pat_match_one pat' sa
     -- SigPatOut (L _ pat) _ -> pat_match_one pat sa
     
     -- Bases --
@@ -87,7 +87,7 @@ pat_match_one pat sa =
     -- Containers --
     ListPat _ pats -> undefined -- need to use pat_match_zip
     -- ListPat _ pats -> unionsWith (++) $ map (\(L _ pat') -> pat_match_one pat' sa) pats -- encodes the logic that all elements of a list might be part of the pattern regardless of order
-    AsPat _ (L _ bound) (L _ pat') -> -- error "At patterns (@) aren't yet supported."
+    AsPat _ (L _ bound) pat' -> -- error "At patterns (@) aren't yet supported."
       let matches = pat_match_one pat' sa
       in (unionWith (++) $ singleton bound [sa]) <$> matches -- note: `at` patterns can't be formally supported, because they might contain sub-patterns that need to hold. They also violate the invariant that "held" pattern targets have a read operation on their surface. However, since this only makes the test _less sensitive_, we'll try as hard as we can and just miss some things later.
         -- TODO test this: the outer binding and inner pattern are related: the inner pattern must succeed for the outer one to as well.
@@ -95,22 +95,34 @@ pat_match_one pat sa =
     -------------------------------
     -- +++ MATCHING PATTERNS +++ --
     -------------------------------
-    TuplePat _ pats _ | TupleConstr _ <- sa_sym sa -> pat_match_zip (map unLoc pats) (sa_args sa)
+    TuplePat _ pats _ | TupleConstr _ <- sa_sym sa -> pat_match_zip pats (sa_args sa)
                       | otherwise -> mempty -- error $ "Argument on explicit tuple. Perhaps a tuple section, which isn't supported yet. PPR:\n" ++ (ppr_sa ppr_unsafe sa)
                       
-    ConPatOut{ pat_con = L _ (RealDataCon pat_con'), pat_args = d_pat_args } -> case d_pat_args of
-      PrefixCon pats | (Sym sym) <- sa_sym sa
-                     , (L _ (HsConLikeOut _ (RealDataCon con)), args'') <- deapp sym
-                     , dataConName con == dataConName pat_con' -- TEMP disable name matching on constructor patterns, to allow symbols to always be bound to everything
-                     -> let flat_args = ((map (\arg'' -> [sa {
-                        sa_sym = Sym arg'',
-                        sa_args = []
-                      }]) args'') ++ sa_args sa) -- STACK good: this decomposition is not a function application so the stack stays the same
-                          -- NOTE this is the distributivity of `consumers` onto subdata of a datatype, as well as the stack
-                            in pat_match_zip (map unLoc pats) flat_args
-                     | otherwise -> Nothing
-    
-      RecCon _ -> error "Record syntax yet to be implemented"
+    ConPatOut { pat_con, pat_args = d_pat_args } -> case unLoc pat_con of
+      RealDataCon pat_con' -> case d_pat_args of
+        PrefixCon pats | (Sym sym) <- sa_sym sa
+                       , (L _ (HsConLikeOut _ (RealDataCon con)), args'') <- deapp sym
+                       , dataConName con == dataConName pat_con' -- TEMP disable name matching on constructor patterns, to allow symbols to always be bound to everything
+                       -> let flat_args = ((map (\arg'' -> [sa {
+                          sa_sym = Sym arg'',
+                          sa_args = []
+                        }]) args'') ++ sa_args sa) -- STACK good: this decomposition is not a function application so the stack stays the same
+                            -- NOTE this is the distributivity of `consumers` onto subdata of a datatype, as well as the stack
+                              in pat_match_zip pats flat_args
+                       | otherwise -> Nothing
+      
+        InfixCon l r -> if ":" == (occNameString $ nameOccName $ dataConName pat_con')
+          then case sa_sym sa of -- special-case list decomp because lists have their own constr syntax
+            ListConstr _ -> union (pat_match_many (zip (repeat l) (sa_args sa))) <$> (pat_match_one r sa)
+            _ -> Nothing
+          else pat_match_one
+            ((\pat' -> pat' {
+                pat_args = PrefixCon [l, r]
+              }) <$> pat)
+            sa
+        RecCon _ -> error "Record syntax yet to be implemented"
+        _ -> error $ show (getLoc pat_con) ++ "\n" ++ constr_ppr d_pat_args
+      _ -> error $ constr_ppr pat
       
     _ -> error $ constr_ppr pat
 
@@ -329,6 +341,10 @@ reduce_deep sa@(SA consumers stack m_sym args thread) =
       fail = error $ "FAIL" ++ (constr_ppr $ m_sym)
   in case m_sym of
     Sym sym -> case unLoc sym of
+      -------------------------------
+      -- +++ NON-TRIVIAL EXPRS +++ --
+      -------------------------------
+      
       HsLamCase _ mg -> unravel1 (HsLam NoExt mg <$ sym) []
       
       HsLam _ mg | let loc = getLoc $ mg_alts mg -- <- NB this is why the locations of MatchGroups don't matter
@@ -338,7 +354,7 @@ reduce_deep sa@(SA consumers stack m_sym args thread) =
                     else
                       let next_binds :: [Bind]
                           next_binds = concatMap ( -- over function body alternatives
-                              flip zip (sa_args sa) . map unLoc . m_pats . unLoc -- `args` FINALLY USED HERE -- [[SymApp]] vs. [Pat]
+                              flip zip (sa_args sa) . m_pats . unLoc -- `args` FINALLY USED HERE -- [[SymApp]] vs. [Pat]
                             ) (unLoc $ mg_alts mg)
                           next_pat_matches :: Map Id [SymApp]
                           next_pat_matches = pat_match_many next_binds -- NOTE no recursive pattern matching needed here because argument patterns are purely deconstructive and can't refer to the new bindings the others make
@@ -437,11 +453,15 @@ reduce_deep sa@(SA consumers stack m_sym args thread) =
       HsApp _ _ _ -> -- this should only come up from the GHC AST, not from our own reduce-unwrap-wrap
         let (fun, next_args) = deapp sym
         in unravel1 fun (map pure next_args) -- I still don't remember why we special-cased HsConLikeOut to let it be `terminal` without evaluating the args, besides premature optimization  (i.e. saving the var lookup and one round of re-reducing the arguments)
-        
-      OpApp _ l_l l_op l_r -> unravel1 l_op [[l_l], [l_r]]
       
-      -- Wrappings
+      -----------------------
+      -- +++ WRAPPINGS +++ --
+      -----------------------
+      
+      OpApp _ l_l l_op l_r -> unravel1 l_op [[l_l], [l_r]]
       HsWrap _ _ v -> unravel1 (const v <$> sym) [] -- why is HsWrap wrapping a bare HsExpr?! No loc? Inferred from surroundings I guess (like this)
+      ExprWithTySig _ v -> unravel1 v []
+      HsAppType _ v -> unravel1 v []
       NegApp _ v _ -> unravel1 v []
       HsPar _ v -> unravel1 v []
       SectionL _ v m_op -> unravel1 m_op [[v]]
@@ -457,7 +477,7 @@ reduce_deep sa@(SA consumers stack m_sym args thread) =
                                 }
                               ) stack_exprs
                             Nothing -> terminal
-                        | otherwise -> error "Unsaturated (i.e. partial) SectionR is not yet supported."
+                        | otherwise -> terminal -- error ("Unsaturated (i.e. partial) SectionR is not yet supported, at:\n  " ++ (show $ getLoc sym)) -- softening the error a bit, but this is still invalid
           
       HsCase _ x mg -> unravel1 (noLoc $ HsApp NoExt (HsLam NoExt mg <$ mg_alts mg) x) [] -- refactor as HsLam so we can just use that pat match code
       HsIf _ _ if_ then_ else_ -> unravel1 then_ [] <> unravel1 else_ []
@@ -487,7 +507,9 @@ reduce_deep sa@(SA consumers stack m_sym args thread) =
             -- fun fact: I thought ParStmt was for "parenthesized", but it's "parallel"
         ) mempty stmts -- push all the work to another round of `reduce_deep`.
       
-      -- SymAppinal forms
+      ----------------------------
+      -- +++ TERMINAL FORMS +++ --
+      ----------------------------
       
       HsConLikeOut _ _ -> terminal -- if length args == 0 then terminal else error "Only bare ConLike should make it to `reduce_deep`" -- still don't remember why I special-cased HsConLikeOut in HsApp
       HsOverLit _ _ -> terminal

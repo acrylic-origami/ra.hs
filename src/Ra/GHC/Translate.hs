@@ -15,11 +15,11 @@ import Ra.Lang -- ( Stack(..), SymApp(..), Sym(..), SymTable(..), PatMatchSyms(.
 import Ra.GHC.Util ( grhs_exprs )
 import Ra.Extra
 
-bind_to_table :: HsBind GhcTc -> [Bind]
-bind_to_table b = case b of
+bind_to_table :: LHsBind GhcTc -> [Bind]
+bind_to_table (L loc b) = case b of
   AbsBinds { abs_exports, abs_binds } ->
-    let subbinds = mconcat $ bagToList $ mapBag (bind_to_table . unLoc) abs_binds -- consider making union_sym_table just Foldable t => ...
-    in subbinds <> map (VarPat NoExt . noLoc . abe_poly &&& pure . sa_from_sym . Sym . noLoc . HsVar NoExt . noLoc . abe_mono) abs_exports
+    let subbinds = mconcat $ bagToList $ mapBag bind_to_table abs_binds -- consider making union_sym_table just Foldable t => ...
+    in subbinds <> map (L loc . VarPat NoExt . noLoc . abe_poly &&& pure . sa_from_sym . Sym . noLoc . HsVar NoExt . noLoc . abe_mono) abs_exports
     
   -- AbsBindsSig { abs_sig_export, abs_sig_bind = L _ abs_sig_bind } -> 
   --   let subbinds = bind_to_table stack abs_sig_bind
@@ -30,9 +30,9 @@ bind_to_table b = case b of
   -------------------
   -- SYM BASE CASE --
   -------------------
-  FunBind { fun_id = fun_id, fun_matches } -> [( VarPat NoExt fun_id, [sa_from_sym (Sym $ noLoc $ HsLam NoExt fun_matches) ])]
+  FunBind { fun_id = fun_id, fun_matches } -> [( L loc (VarPat NoExt fun_id), [sa_from_sym (Sym $ noLoc $ HsLam NoExt fun_matches) ])]
   
-  PatBind { pat_lhs = L _ pat_lhs, pat_rhs } ->
+  PatBind { pat_lhs = pat_lhs, pat_rhs } ->
     grhs_binds pat_rhs <> [(pat_lhs, map (sa_from_sym . Sym) (grhs_exprs pat_rhs))]
   VarBind {} -> mempty
   _ -> error $ constr_ppr b
@@ -45,7 +45,7 @@ grhs_binds = everythingBut (<>) (
     (mempty, False)
     `mkQ` ((,True) . bind_to_table)
     `extQ` ((,False) . ((\case
-        BindStmt _ (L _ pat) expr _ _ -> [(pat, [sa_from_sym (Sym expr)])] -- TODO check if a fresh stack key here is the right thing to do
+        BindStmt _ pat expr _ _ -> [(pat, [sa_from_sym (Sym expr)])] -- TODO check if a fresh stack key here is the right thing to do
         _ -> mempty
       ) . unLoc :: LStmt GhcTc (LHsExpr GhcTc) -> [Bind])) -- TODO dangerous: should we really keep looking deeper after finding a BindStmt?
     `extQ` ((mempty,) . ((\case 
