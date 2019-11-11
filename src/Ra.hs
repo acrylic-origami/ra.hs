@@ -183,7 +183,7 @@ pat_match binds =
                                       . (sub next_table &&& id)
                                     )
                                 )
-                                `extQT` (const (Q Nothing) :: Stack -> Q ReduceSyms Stack)
+                                -- `extQT` (const (Q Nothing) :: Stack -> Q ReduceSyms Stack)
                             )
                           ) mempty pms
                     in (
