@@ -5,8 +5,10 @@ module J where
   
   foo = do
     x <- newEmptyMVar
-    _ <- putMVar x (bar 42)
+    _ <- putMVar x $ bar 42
     readMVar x
   
   bar :: Consumer a
   bar = id
+  
+  baz f x = f x

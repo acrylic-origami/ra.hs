@@ -126,6 +126,7 @@ type Write = SymApp
 --   (Write l_stack _) <= (Write r_stack _) = l_loc <= r_loc
   
 type Writes = [([Pipe], [Write])] -- TODO not my prettiest kludge: this went from unique pipe to many writes (in a Map) to non-unique pipe to many writes (`[(Pipe, [Write])]`) to this: a free-for-all relationship. All to allow `pat_match` to be generic.
+type DoStmt = []
 type Pipe = SymApp -- LHsExpr GhcTc
 
 data SymApp = SA {

@@ -113,7 +113,9 @@ pat_match_one pat sa =
       
         InfixCon l r -> if ":" == (occNameString $ nameOccName $ dataConName pat_con')
           then case sa_sym sa of -- special-case list decomp because lists have their own constr syntax
-            ListConstr _ -> union (pat_match_many (zip (repeat l) (sa_args sa))) <$> (pat_match_one r sa)
+            ListConstr _ -> if length (sa_args sa) > 0
+              then (or_pat_match_many (zip (repeat l) (sa_args sa))) <> (pat_match_one r sa) -- `or` here because any member of the list can work -- `union` mechanics are fine here because the bound names can't be shared between head and tail
+              else Nothing
             _ -> Nothing
           else pat_match_one
             ((\pat' -> pat' {
@@ -129,56 +131,72 @@ pat_match_one pat sa =
 newtype Q a b = Q (Maybe (a, b)) deriving (Data, Typeable)
 unQ (Q z) = z
 
-pat_match_many :: [Bind] -> Map Id [SymApp]
-pat_match_many = unionsWith (++) . map (unionsWith (++)) . map (catMaybes . uncurry map . first pat_match_one)
+or_pat_match_many :: [Bind] -> Maybe (Map Id [SymApp])
+or_pat_match_many = pat_match_many (\a b -> liftA2 (unionWith (++)) a b <|> a <|> b) -- could've been `<>` if that was `unionWith (++)` for these maps, but instead `union` destroys the rhs in collisions
+
+and_pat_match_many :: [Bind] -> Maybe (Map Id [SymApp])
+and_pat_match_many = pat_match_many (liftA2 (unionWith (++)))
+
+pat_match_many :: (Maybe (Map Id [SymApp]) -> Maybe (Map Id [SymApp]) -> Maybe (Map Id [SymApp])) -> [Bind] -> Maybe (Map Id [SymApp])
+pat_match_many f = foldr1 f . map mapper
+  where mapper (pat, exprs@(_:_)) = foldr1 f $ map (pat_match_one pat) exprs
+        mapper _ = Nothing -- TODO being a little sloppy here, assuming that `Nothing` is an acceptable result for a default. In fact, note that if `f` was `const (const (Just mempty))` this would still return `Nothing` if there are single matches. Then there's a sharp phase change with 2 elems when they all pass. 
 
 pat_match :: [Bind] -> PatMatchSyms
 pat_match binds = 
-  let sub :: Map Id [SymApp] -> SymApp -> ReduceSyms
+  let sub :: Map Id [SymApp] -> SymApp -> Maybe ReduceSyms
       sub t sa = -- assumes incoming term is a normal form
         let subbed_sa = sub_sa_types_wo_stack sa sa -- really hope this works
-            m_next_syms :: Maybe ReduceSyms
-            m_next_syms = case sa_sym subbed_sa of
-              Sym (L _ (HsVar _ (L _ v))) -> if not $ v `elem` (var_ref_tail $ sa_stack subbed_sa)
-                then (
-                      mconcat
-                      -- . map (\rs' ->
-                      --     let rss' = map (sub t) (rs_syms rs')
-                      --     in map (uncurry (id )) (zip rss' (rs_syms rs')))
-                      . map (\sa' ->
-                          reduce_deep $ sa' {
-                            sa_stack = mapSB ((VarRefFrame v):) (sa_stack sa'),
-                            sa_args = (sa_args sa') <> (sa_args subbed_sa)
-                          }
-                        )
+        in case sa_sym subbed_sa of
+          Sym (L _ (HsVar _ (L _ v))) -> if not $ v `elem` (var_ref_tail $ sa_stack subbed_sa)
+            then (
+                  mconcat
+                  -- . map (\rs' ->
+                  --     let rss' = map (sub t) (rs_syms rs')
+                  --     in map (uncurry (id )) (zip rss' (rs_syms rs')))
+                  . map (\sa' ->
+                      reduce_deep $ sa' {
+                        sa_stack = mapSB ((VarRefFrame v):) (sa_stack sa'),
+                        sa_args = (sa_args sa') <> (sa_args subbed_sa)
+                      }
                     )
-                  <$> (table_lookup v t)
-                else Nothing
-              _ -> Nothing
-        in fromMaybe mempty m_next_syms
+                )
+              <$> (table_lookup v t)
+            else Nothing
+          _ -> Nothing
       
       iterant :: PatMatchSyms -> (Bool, PatMatchSyms)
-      iterant pms =
-        let f0 :: Data b => b -> Q ReduceSyms b
-            f0 b = Q $ Just (mempty, b)
-            next_table = pat_match_many (stbl_binds $ pms_syms pms) -- even if all the matches failed, we might've made new writes which might make some matches succeed
-            binder = everywhereWithContextBut (<>) (
-                  unQ . (
-                      f0
-                        `mkQT` (Q . Just . (mconcat *** concat) . unzip . map ((fst &&& uncurry list_alt . (rs_syms *** pure)) . (sub next_table &&& id)))
-                        `extQT` (const (Q Nothing) :: Stack -> Q ReduceSyms Stack)
-                    )
-              ) mempty
-            (next_rs, next_pms) = binder pms
-        in (
-            null $ rs_syms next_rs,
-            next_pms {
-              pms_writes = rs_writes next_rs <> pms_writes next_pms
-            }
-          )
+      iterant pms | let binds = stbl_binds $ pms_syms pms
+                  , length binds > 0
+                  , Just next_table <- or_pat_match_many binds
+                  = let f0 :: Data b => b -> Q (Maybe ReduceSyms) b
+                        f0 b = Q $ Just (Nothing, b)
+                        (m_next_rs, next_pms) =
+                          everywhereWithContextBut (<>) (unQ . (
+                              f0 `mkQT` (Q . Just . 
+                                  (mconcat *** concat)
+                                  . unzip . map (
+                                      (
+                                          fst
+                                          &&& uncurry (flip fromMaybe) . (fmap rs_syms *** pure)
+                                        )
+                                      . (sub next_table &&& id)
+                                    )
+                                )
+                                `extQT` (const (Q Nothing) :: Stack -> Q ReduceSyms Stack)
+                            )
+                          ) mempty pms
+                    in (
+                        isNothing m_next_rs,
+                        -- INVARIANT below is identical to pms if m_next_rs is empty. Difficult to prove because of generic transformation.
+                        next_pms {
+                          pms_writes = pms_writes next_pms <> fromMaybe mempty (rs_writes <$> m_next_rs)
+                        }
+                      )  
+                  | otherwise = (True, pms)    
       
-      (rs0, binds0) = first mconcat $ unzip $ map ((\(pat, rs) -> (rs, (pat, rs_syms rs))) . second (mconcat . map reduce_deep)) binds -- [(Pat, ReduceSyms)] => [(ReduceSyms, (Pat, [SymApp]))] => ([ReduceSyms], [(Pat, SymApp)])
-      (_, pmsn) = until fst (iterant . snd) (False, PatMatchSyms {
+      (rs0, binds0) = first mconcat $ unzip $ map ((\(pat, rs) -> (rs, (pat, rs_syms rs))) . second (mconcat . map reduce_deep)) binds -- don't assume any symapps coming in are NF
+      (True, pmsn) = until fst (iterant . snd) (False, PatMatchSyms {
             pms_writes = rs_writes rs0,
             pms_syms = mempty {
               stbl_binds = binds0
@@ -186,7 +204,9 @@ pat_match binds =
           })
     in pmsn {
       pms_syms = (pms_syms pmsn) {
-        stbl_table = pat_match_many (stbl_binds $ pms_syms pmsn)
+        stbl_table = if length (stbl_binds (pms_syms pmsn)) > 0
+          then fromMaybe mempty (or_pat_match_many (stbl_binds (pms_syms pmsn))) -- `or` here because scattered bindings
+          else mempty
       }
     }
 
@@ -353,40 +373,34 @@ reduce_deep sa@(SA consumers stack m_sym args thread) =
       
       HsLamCase _ mg -> unravel1 (HsLam NoExt mg <$ sym) []
       
-      HsLam _ mg | let loc = getLoc $ mg_alts mg -- <- NB this is why the locations of MatchGroups don't matter
-                 , not $ is_visited stack sa -> -- beware about `noLoc`s showing up here: maybe instead break out the pattern matching code
-                  if matchGroupArity mg > length args
-                    then terminal -- note this is the only place where 
-                    else
-                      let next_binds :: [Bind]
-                          next_binds = concatMap ( -- over function body alternatives
-                              flip zip (sa_args sa) . m_pats . unLoc -- `args` FINALLY USED HERE -- [[SymApp]] vs. [Pat]
-                            ) (unLoc $ mg_alts mg)
-                          next_pat_matches :: Map Id [SymApp]
-                          next_pat_matches = pat_match_many next_binds -- NOTE no recursive pattern matching needed here because argument patterns are purely deconstructive and can't refer to the new bindings the others make
-                          
-                          bind_pms@(PatMatchSyms {
-                              pms_syms = next_explicit_binds,
-                              pms_writes = bind_writes
-                            }) = pat_match $ grhs_binds mg -- STACK questionable: do we need the new symbol here? Shouldn't it be  -- localize binds correctly via pushing next stack location
-                          next_exprs = sub_sa_types_wo_stack sa $ grhs_exprs $ map (grhssGRHSs . m_grhss . unLoc) $ unLoc $ mg_alts mg
-                          next_frame = AppFrame sa (SymTable {
-                              stbl_table = next_pat_matches,
-                              stbl_binds = next_binds
-                            } <> next_explicit_binds)
-                          next_stack = mapSB (next_frame:) stack
-                          next_args = drop (matchGroupArity mg) args
-                      in mempty {
-                        rs_writes = pms_writes bind_pms
-                      }
-                        <> (mconcat $ map (\next_expr ->
-                            reduce_deep sa {
-                              sa_stack = next_stack,
-                              sa_sym = Sym next_expr,
-                              sa_args = next_args
-                            }
-                          ) next_exprs) -- TODO check if the sym record update + args are correct for this stage
-                 | otherwise -> mempty
+      HsLam _ mg | is_visited stack sa -> mempty -- beware about `noLoc`s showing up here: maybe instead break out the pattern matching code
+                 | matchGroupArity mg <= length args 
+                 , let next_arg_binds = concatMap ( flip zip (sa_args sa) . m_pats . unLoc ) (unLoc $ mg_alts mg)
+                 , Just next_arg_matches <- if length next_arg_binds > 0
+                    then and_pat_match_many next_arg_binds -- `and` here because we need to stop evaluating if this alternative doesn't match the input
+                    else Just mempty -- NOTE no recursive pattern matching needed here because argument patterns are purely deconstructive and can't refer to the new bindings the others make
+                 -> let bind_pms@(PatMatchSyms {
+                            pms_syms = next_explicit_binds,
+                            pms_writes = bind_writes
+                          }) = pat_match $ grhs_binds mg -- STACK questionable: do we need the new symbol here? Shouldn't it be  -- localize binds correctly via pushing next stack location
+                        next_exprs = sub_sa_types_wo_stack sa $ grhs_exprs $ map (grhssGRHSs . m_grhss . unLoc) $ unLoc $ mg_alts mg
+                        next_frame = AppFrame sa (SymTable {
+                            stbl_table = next_arg_matches,
+                            stbl_binds = next_arg_binds
+                          } <> next_explicit_binds)
+                        next_stack = mapSB (next_frame:) stack
+                        next_args = drop (matchGroupArity mg) args
+                    in mempty {
+                      rs_writes = pms_writes bind_pms
+                    }
+                      <> (mconcat $ map (\next_expr ->
+                          reduce_deep sa {
+                            sa_stack = next_stack,
+                            sa_sym = Sym next_expr,
+                            sa_args = next_args
+                          }
+                        ) next_exprs) -- TODO check if the sym record update + args are correct for this stage
+                 | otherwise -> terminal
             
       HsVar _ (L loc v) ->
         let args' | arg1:rest <- args
