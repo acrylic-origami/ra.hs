@@ -522,21 +522,21 @@ reduce_deep sa@(SA consumers stack m_sym args thread) =
         
       HsLet _ _ expr -> unravel1 expr [] -- assume local bindings already caught by surrounding function body (HsLam case)
       HsDo _ _ (L _ stmts) -> foldl (\syms (L _ stmt) ->
-          case stmt of
-            LastStmt _ expr _ _ -> syms { rs_syms = mempty } <> unravel1 expr [] -- kill the results from all previous stmts because of the semantics of `>>`
-            -- ApplicativeStmt _ _ _ -> undefined -- TODO yet to appear in the wild and be implemented
-            BindStmt _pat _expr _ _ _ty -> syms -- covered by binds; can't be the last statement anyways -- <- scratch that -- TODO implement this to unbox the monad (requires fake IO structure2) -- <- scratch THAT, we're not going to do anything because the binds are covered in grhs_binds; we're letting IO and other magic monads be unravelled into their values contained within to simplify analysis
-            LetStmt _ _ -> syms -- same story as BindStmt
-            BodyStmt _ expr _ _ ->
-              let next_rs = unravel1 expr []
-              in syms { rs_syms = mempty }
-                 <> next_rs {
-                   rs_syms = mempty,
-                   rs_stmts = (rs_stmts next_rs) <> (rs_syms next_rs)
-                 }
-            ParStmt _ _ _ _ -> undefined -- not analyzed for now, because the list comp is too niche (only used for parallel monad comprehensions; see <https://gitlab.haskell.org/ghc/ghc/wikis/monad-comprehensions>)
-            _ -> fail
-            -- fun fact: I thought ParStmt was for "parenthesized", but it's "parallel"
+          let m_next_expr :: Maybe (LHsExpr GhcTc) -- Quite inflexible type: the stuff going on there doesn't let you do much
+              m_next_expr = case stmt of
+                LastStmt _ expr _ _ -> Just expr -- kill the results from all previous stmts because of the semantics of `>>`
+                -- ApplicativeStmt _ _ _ -> undefined -- TODO yet to appear in the wild and be implemented
+                BindStmt _ _pat expr _ _ty -> Just expr -- covered by binds; can't be the last statement anyways -- <- scratch that -- TODO implement this to unbox the monad (requires fake IO structure2) -- <- scratch THAT, we're not going to do anything because the binds are covered in grhs_binds; we're letting IO and other magic monads be unravelled into their values contained within to simplify analysis
+                LetStmt _ _ -> Nothing -- same story as BindStmt
+                BodyStmt _ expr _ _ -> Just expr
+                ParStmt _ _ _ _ -> Nothing -- not analyzed for now, because the list comp is too niche (only used for parallel monad comprehensions; see <https://gitlab.haskell.org/ghc/ghc/wikis/monad-comprehensions>)
+                _ -> fail
+                -- fun fact: I thought ParStmt was for "parenthesized", but it's "parallel"
+              m_next_syms = flip unravel1 [] <$> m_next_expr
+          in syms { -- combining rule assumes LastStmt is really the last statement every time
+            rs_syms = fromMaybe mempty (rs_syms <$> m_next_syms),
+            rs_stmts = rs_stmts syms <> fromMaybe mempty ((rs_stmts <$> m_next_syms) <> (rs_syms <$> m_next_syms))
+          }
         ) mempty stmts -- push all the work to another round of `reduce_deep`.
       
       ----------------------------
