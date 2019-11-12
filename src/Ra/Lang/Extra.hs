@@ -5,8 +5,8 @@ module Ra.Lang.Extra (
   ppr_sa,
   ppr_rs,
   ppr_pms,
-  ppr_stack,
-  ppr_writes
+  ppr_stack
+  -- ppr_writes
 ) where
 
 import GHC ( LHsExpr, GhcTc )
@@ -49,9 +49,9 @@ ppr_sa show' = go 0 where
             )
           )
 
-ppr_writes :: Printer -> Writes -> String
-ppr_writes show' = concatMap ((++"\n---\n") . uncurry ((++) . (++" -> ")) . (both $ concatMap ((++"\n") . ppr_sa show'))) where
-  both f = (f *** f)
+-- ppr_writes :: Printer -> Writes -> String
+-- ppr_writes show' = concatMap ((++"\n---\n") . uncurry ((++) . (++" -> ")) . (both $ concatMap ((++"\n") . ppr_sa show'))) where
+--   both f = (f *** f)
 
 -- ppr_hold :: Printer -> Hold -> String
 -- ppr_hold show' = uncurry ((++) . (++" <- ")) . (show' . h_pat &&& ppr_sa show' . h_sym)
@@ -60,7 +60,7 @@ ppr_rs :: Printer -> ReduceSyms -> String
 ppr_rs show' = flip concatMap printers . (("\n===\n"++).) . flip ($) where
   printers = [
       concatMap ((++"\n") . ppr_sa show') . rs_syms
-      , ppr_writes show' . rs_writes
+      , concatMap ((++"\n") . ppr_sa show') . rs_stmts
     ]
 
 ppr_pms :: Printer -> PatMatchSyms -> String
@@ -68,7 +68,7 @@ ppr_pms show' = flip concatMap printers . (("\n===\n"++).) . flip ($) where
   printers = [
       concatMap ((++"\n") . uncurry ((++) . (++" -> ")) . (show' *** concatMap ((++"\n") . ppr_sa show'))) . assocs . stbl_table . pms_syms
       , concatMap ((++"\n") . uncurry ((++) . (++" -> ")) . (show' *** concatMap (ppr_sa show'))) . stbl_binds . pms_syms
-      , ppr_writes show' . pms_writes
+      , concatMap ((++"\n") . ppr_sa show') . pms_stmts
     ]
 
 -- ppr_stack :: Printer -> Stack -> String

@@ -17,14 +17,15 @@ module Ra.Lang (
   update_head_table,
   ReduceSyms(..),
   PatMatchSyms(..),
-  append_pms_writes,
-  append_rs_writes,
+  append_pms_stmts,
+  append_rs_stmts,
   pms2rs,
   lift_rs_syms2,
   SymApp(..),
   sa_from_sym,
   Write,
   Writes(..),
+  DoStmt(..),
   -- Hold(..),
   Pipe,
   Bind,
@@ -126,7 +127,7 @@ type Write = SymApp
 --   (Write l_stack _) <= (Write r_stack _) = l_loc <= r_loc
   
 type Writes = [([Pipe], [Write])] -- TODO not my prettiest kludge: this went from unique pipe to many writes (in a Map) to non-unique pipe to many writes (`[(Pipe, [Write])]`) to this: a free-for-all relationship. All to allow `pat_match` to be generic.
-type DoStmt = []
+type DoStmt = SymApp
 type Pipe = SymApp -- LHsExpr GhcTc
 
 data SymApp = SA {
@@ -153,12 +154,12 @@ instance Eq SymApp where
 
 data PatMatchSyms = PatMatchSyms {
   pms_syms :: SymTable,
-  pms_writes :: Writes
+  pms_stmts :: [DoStmt]
 } deriving (Data, Typeable)
 
 data ReduceSyms = ReduceSyms {
   rs_syms :: [SymApp],
-  rs_writes :: Writes
+  rs_stmts :: [DoStmt]
 } deriving (Data, Typeable)
 
 lift_rs_syms2 :: ([SymApp] -> [SymApp] -> [SymApp]) -> ReduceSyms -> ReduceSyms -> ReduceSyms
@@ -174,15 +175,15 @@ lift_rs_syms2 f a b = (a <> b) {
 -- type ReduceSyms = Syms []
 -- type PatMatchSyms = Syms (Map Id) -- can't use SymTable because partially-applied type synonyms are illegal. This trouble to keep Syms generalized is getting very close to impractical
 
-append_rs_writes ws rs = rs {
-  rs_writes = ws <> (rs_writes rs)
+append_rs_stmts ws rs = rs {
+  rs_stmts = ws <> (rs_stmts rs)
 }
-append_pms_writes ws pms = pms {
-  pms_writes = ws <> (pms_writes pms)
+append_pms_stmts ws pms = pms {
+  pms_stmts = ws <> (pms_stmts pms)
 }
 pms2rs pms = ReduceSyms {
   rs_syms = concat $ elems $ stbl_table $ pms_syms pms,
-  rs_writes = pms_writes pms
+  rs_stmts = pms_stmts pms
 }
 
 data StackFrame = EmptyFrame | VarRefFrame Id | AppFrame {
@@ -232,7 +233,7 @@ instance Monoid Stack where
   mappend = (<>)
 
 instance Semigroup ReduceSyms where
-  (ReduceSyms lsyms lwrites) <> (ReduceSyms rsyms  rwrites) = ReduceSyms (lsyms <> rsyms) (lwrites <> rwrites) -- is there a nicer way to do this?
+  (ReduceSyms lsyms lstmts) <> (ReduceSyms rsyms  rstmts) = ReduceSyms (lsyms <> rsyms) (lstmts <> rstmts) -- is there a nicer way to do this?
   
   -- vs. (<>) = curry $ uncurry ReduceSyms . ((uncurry (++) . fmap rs_syms) &&& (uncurry (unionWith (++)) . fmap ss_syms))
 
@@ -242,7 +243,7 @@ instance Monoid ReduceSyms where
 
 
 instance Semigroup PatMatchSyms where
-  (PatMatchSyms lsyms lwrites) <> (PatMatchSyms rsyms rwrites) = PatMatchSyms (lsyms <> rsyms) (lwrites <> rwrites)
+  (PatMatchSyms lsyms lstmts) <> (PatMatchSyms rsyms rstmts) = PatMatchSyms (lsyms <> rsyms) (lstmts <> rstmts)
   
 instance Monoid PatMatchSyms where
   mempty = PatMatchSyms mempty mempty

@@ -190,14 +190,14 @@ pat_match binds =
                         isNothing m_next_rs,
                         -- INVARIANT below is identical to pms if m_next_rs is empty. Difficult to prove because of generic transformation.
                         next_pms {
-                          pms_writes = pms_writes next_pms <> fromMaybe mempty (rs_writes <$> m_next_rs)
+                          pms_stmts = pms_stmts next_pms <> fromMaybe mempty (rs_stmts <$> m_next_rs)
                         }
                       )  
                   | otherwise = (True, pms)    
       
       (rs0, binds0) = first mconcat $ unzip $ map ((\(pat, rs) -> (rs, (pat, rs_syms rs))) . second (mconcat . map reduce_deep)) binds -- don't assume any symapps coming in are NF
       (True, pmsn) = until fst (iterant . snd) (False, PatMatchSyms {
-            pms_writes = rs_writes rs0,
+            pms_stmts = rs_stmts rs0,
             pms_syms = mempty {
               stbl_binds = binds0
             }
@@ -234,13 +234,19 @@ reduce syms0 =
       
       iterant :: ReduceSyms -> ReduceSyms
       iterant rs =
-        let update_stack sa =
+        let
+            writes = catMaybes $ map (\sa -> case sa_sym sa of
+                Sym (L _ (HsVar _ v)) | varString (unLoc v) == "putMVar"
+                                      , (pipes:vals:_) <- sa_args sa
+                                      -> Just (pipes, vals)
+                _ -> Nothing) (rs_stmts rs)
+            update_stack sa =
               let (next_pms', next_stack) = (mconcat *** SB) $ unzip $ map (\case
                       af@(AppFrame { af_syms }) ->
-                        let (next_rs', next_binds) = (first mconcat) $ unzip $ map ((snd &&& second rs_syms) . second (mconcat . map (expand_reads (rs_writes rs)))) (stbl_binds af_syms)
+                        let (next_rs', next_binds) = (first mconcat) $ unzip $ map ((snd &&& second rs_syms) . second (mconcat . map (expand_reads writes))) (stbl_binds af_syms)
                             next_pms'' = pat_match next_binds
                         in (next_pms'' {
-                            pms_writes = pms_writes next_pms'' <> rs_writes next_rs'
+                            pms_stmts = pms_stmts next_pms'' <> rs_stmts next_rs'
                           }, af {
                             af_syms = pms_syms next_pms''
                           })
@@ -252,13 +258,13 @@ reduce syms0 =
                 sa_args = next_args
               })
               
-            (next_pms, next_rs) = (mconcat *** mconcat) $ unzip $ map (second (expand_reads (rs_writes rs)) . update_stack) $ rs_syms rs
-            next_writes = (rs_writes next_rs) <> (pms_writes next_pms)
+            (next_pms, next_rs) = (mconcat *** mconcat) $ unzip $ map (second (expand_reads writes) . update_stack) $ rs_syms rs
+            next_stmts = (rs_stmts next_rs) <> (pms_stmts next_pms)
         in next_rs {
-            rs_writes = next_writes
+            rs_stmts = next_stmts
           }
         
-  in head $ filter (null . rs_writes . head) $ iterate (\l -> (iterant $ head l) : l) [syms0]
+  in head $ filter (null . rs_stmts . head) $ iterate (\l -> (iterant $ head l) : l) [syms0]
   -- takeWhile (not . null . rs_writes) $ foldl (\l _ -> l ++ [iterant $ head l]) [syms0] [0..] -- interesting that this doesn't seem to be possible
 
 -- app_types :: Type -> Type -> Type
@@ -381,7 +387,7 @@ reduce_deep sa@(SA consumers stack m_sym args thread) =
                     else Just mempty -- NOTE no recursive pattern matching needed here because argument patterns are purely deconstructive and can't refer to the new bindings the others make
                  -> let bind_pms@(PatMatchSyms {
                             pms_syms = next_explicit_binds,
-                            pms_writes = bind_writes
+                            pms_stmts = bind_stmts
                           }) = pat_match $ grhs_binds mg -- STACK questionable: do we need the new symbol here? Shouldn't it be  -- localize binds correctly via pushing next stack location
                         next_exprs = sub_sa_types_wo_stack sa $ grhs_exprs $ map (grhssGRHSs . m_grhss . unLoc) $ unLoc $ mg_alts mg
                         next_frame = AppFrame sa (SymTable {
@@ -391,7 +397,7 @@ reduce_deep sa@(SA consumers stack m_sym args thread) =
                         next_stack = mapSB (next_frame:) stack
                         next_args = drop (matchGroupArity mg) args
                     in mempty {
-                      rs_writes = pms_writes bind_pms
+                      rs_stmts = pms_stmts bind_pms
                     }
                       <> (mconcat $ map (\next_expr ->
                           reduce_deep sa {
@@ -461,12 +467,12 @@ reduce_deep sa@(SA consumers stack m_sym args thread) =
                       rs_syms = [error "Using the ThreadID from forkIO is not yet supported."]
                     }
                     
-              "putMVar" -> if length args' >= 2
-                then
-                  let (pipes:vals:_) = args'
-                      next_writes = [(pipes, vals)]
-                  in append_rs_writes next_writes terminal'
-                else terminal'
+              -- "putMVar" -> if length args' >= 2
+              --   then
+              --     let (pipes:vals:_) = args'
+              --         next_writes = [(pipes, vals)]
+              --     in append_rs_stmts next_writes terminal'
+              --   else terminal'
                 
               _ -> terminal'
         
@@ -504,10 +510,10 @@ reduce_deep sa@(SA consumers stack m_sym args thread) =
       HsMultiIf ty rhss ->
         let PatMatchSyms {
                 pms_syms = next_explicit_binds,
-                pms_writes = bind_writes
+                pms_stmts = bind_stmts
               } = pat_match $ grhs_binds rhss
             next_exprs = grhs_exprs rhss
-        in mempty { rs_writes = bind_writes }
+        in mempty { rs_stmts = bind_stmts }
           <> (mconcat $ map (\next_expr ->
               reduce_deep sa {
                 sa_sym = Sym next_expr,
@@ -519,9 +525,15 @@ reduce_deep sa@(SA consumers stack m_sym args thread) =
           case stmt of
             LastStmt _ expr _ _ -> syms { rs_syms = mempty } <> unravel1 expr [] -- kill the results from all previous stmts because of the semantics of `>>`
             -- ApplicativeStmt _ _ _ -> undefined -- TODO yet to appear in the wild and be implemented
-            BindStmt pat expr _ _ ty -> syms -- covered by binds; can't be the last statement anyways -- <- scratch that -- TODO implement this to unbox the monad (requires fake IO structure2) -- <- scratch THAT, we're not going to do anything because the binds are covered in grhs_binds; we're letting IO and other magic monads be unravelled into their values contained within to simplify analysis
+            BindStmt _pat _expr _ _ _ty -> syms -- covered by binds; can't be the last statement anyways -- <- scratch that -- TODO implement this to unbox the monad (requires fake IO structure2) -- <- scratch THAT, we're not going to do anything because the binds are covered in grhs_binds; we're letting IO and other magic monads be unravelled into their values contained within to simplify analysis
             LetStmt _ _ -> syms -- same story as BindStmt
-            BodyStmt _ expr _ _ -> syms { rs_syms = mempty } <> unravel1 expr []
+            BodyStmt _ expr _ _ ->
+              let next_rs = unravel1 expr []
+              in syms { rs_syms = mempty }
+                 <> next_rs {
+                   rs_syms = mempty,
+                   rs_stmts = (rs_stmts next_rs) <> (rs_syms next_rs)
+                 }
             ParStmt _ _ _ _ -> undefined -- not analyzed for now, because the list comp is too niche (only used for parallel monad comprehensions; see <https://gitlab.haskell.org/ghc/ghc/wikis/monad-comprehensions>)
             _ -> fail
             -- fun fact: I thought ParStmt was for "parenthesized", but it's "parallel"
