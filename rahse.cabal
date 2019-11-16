@@ -20,6 +20,6 @@ executable rahse
   main-is:				  Main.hs
   other-modules:       Ra, Ra.GHC.Translate, Ra.GHC.Util, Ra.Refs, Ra.Lang, Ra.Lang.Extra, Ra.Extra, Data.Generics.Extra
   -- other-extensions:    
-  build-depends:       base, ghc >= 8.2.2, ghc-paths >= 0.1.0.9, syb >= 0.7, bytestring, containers
+  build-depends:       base, ghc >= 8.2.2, ghc-paths >= 0.1.0.9, syb >= 0.7, bytestring, containers, fgl
   hs-source-dirs:      src, syb-extra/src, standalone, purebase/hiddens, purebase/insts, purebase/base
   default-language:    Haskell2010

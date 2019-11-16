@@ -13,7 +13,8 @@ module Ra.Lang (
   table_lookup,
   make_stack_key,
   -- make_thread_key,
-  var_ref_tail,
+  stack_apps,
+  stack_var_refs,
   update_head_table,
   ReduceSyms(..),
   PatMatchSyms(..),
@@ -31,7 +32,6 @@ module Ra.Lang (
   Bind,
   ReduceStateMachine(..),
   is_parent,
-  is_visited,
   is_zeroth_kind,
   runIO_expr
 ) where
@@ -143,14 +143,14 @@ data SymApp = SA {
 
 sa_from_sym s = SA mempty mempty s mempty Nothing
 
-instance Eq SymApp where
-  (==) = curry $ flip all preds . flip ($) where
-    preds = [
-        uncurry (==) . both sa_args,
-        uncurry (==) . both sa_stack,
-        uncurry (==) . both (getSymLoc . sa_sym),
-        uncurry (==) . both sa_thread
-      ]
+-- instance Eq SymApp where
+--   (==) = curry $ flip all preds . flip ($) where
+--     preds = [
+--         uncurry (==) . both sa_args,
+--         uncurry (==) . both sa_stack,
+--         uncurry (==) . both (getSymLoc . sa_sym)
+--         -- uncurry (==) . both sa_thread -- I think a recursive call could keep spawning new threads of itself
+--       ]
 
 data PatMatchSyms = PatMatchSyms {
   pms_syms :: SymTable,
@@ -212,12 +212,6 @@ instance Eq Stack where
 
 is_parent = undefined
 -- is_parent p q = SB (take (length (unSB q)) (unSB p)) == q
-
-is_visited :: Stack -> SymApp -> Bool
-is_visited sb sa = any (\case
-    AppFrame { af_raw } -> af_raw == sa
-    _ -> False
-  ) (unSB sb)
 
 instance Semigroup Stack where
   (<>) =
@@ -291,11 +285,17 @@ make_stack_key = uncurry (:) . (
       ) . unSB . sa_stack -- map fst . unSB
   )
 
--- var_ref_tail used for the law that var resolution cycles only apply to the tail
-var_ref_tail :: Stack -> [Id]
-var_ref_tail = var_ref_tail' . unSB where
-  var_ref_tail' ((VarRefFrame v):rest) = v:(var_ref_tail' rest)
-  var_ref_tail' _ = []
+stack_apps :: Stack -> [StackFrame]
+stack_apps = filter (\case { AppFrame {} -> True; _ -> False }) . unSB
+
+stack_var_refs :: Stack -> [Id]
+stack_var_refs = catMaybes . map (\case { VarRefFrame v -> Just v; _ -> Nothing }) . unSB
+
+-- stack_var_refs used for the law that var resolution cycles only apply to the tail
+-- stack_var_refs :: Stack -> [Id]
+-- stack_var_refs = stack_var_refs' . unSB where
+--   stack_var_refs' ((VarRefFrame v):rest) = v:(stack_var_refs' rest)
+--   stack_var_refs' _ = []
 
 table_lookup :: Id -> Map Id [SymApp] -> Maybe [SymApp]
 table_lookup v tbl = uncurry (<|>) $ (

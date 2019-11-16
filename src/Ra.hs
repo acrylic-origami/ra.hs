@@ -148,17 +148,22 @@ pat_match binds =
       sub t sa = -- assumes incoming term is a normal form
         let subbed_sa = sub_sa_types_wo_stack sa sa -- really hope this works
         in case sa_sym subbed_sa of
-          Sym (L _ (HsVar _ (L _ v))) -> if not $ v `elem` (var_ref_tail $ sa_stack subbed_sa)
+          Sym (L _ (HsVar _ (L _ v))) -> if not $ v `elem` (stack_var_refs $ sa_stack subbed_sa)
             then (
                   mconcat
                   -- . map (\rs' ->
                   --     let rss' = map (sub t) (rs_syms rs')
                   --     in map (uncurry (id )) (zip rss' (rs_syms rs')))
                   . map (\sa' ->
-                      reduce_deep $ sa' {
-                        sa_stack = mapSB ((VarRefFrame v):) (sa_stack sa'),
-                        sa_args = (sa_args sa') <> (sa_args subbed_sa)
-                      }
+                      reduce_deep
+                        $ everywhereBut
+                            (False `mkQ` (const True :: Stack -> Bool))
+                            (mkT $ \sa -> sa {
+                              sa_stack = mapSB ((VarRefFrame v):) (sa_stack sa)
+                            })
+                        $ sa' {
+                          sa_args = (sa_args sa') <> (sa_args subbed_sa)
+                        }
                     )
                 )
               <$> (table_lookup v t)
@@ -379,8 +384,7 @@ reduce_deep sa@(SA consumers stack m_sym args thread) =
       
       HsLamCase _ mg -> unravel1 (HsLam NoExt mg <$ sym) []
       
-      HsLam _ mg | is_visited stack sa -> mempty -- beware about `noLoc`s showing up here: maybe instead break out the pattern matching code
-                 | matchGroupArity mg <= length args 
+      HsLam _ mg | matchGroupArity mg <= length args 
                  , let next_arg_binds = concatMap ( flip zip (sa_args sa) . m_pats . unLoc ) (unLoc $ mg_alts mg)
                  , Just next_arg_matches <- if length next_arg_binds > 0
                     then and_pat_match_many next_arg_binds -- `and` here because we need to stop evaluating if this alternative doesn't match the input
@@ -420,13 +424,13 @@ reduce_deep sa@(SA consumers stack m_sym args thread) =
                 rs_syms = map (\sa' -> sa' { sa_consumers = sa_consumers sa' ++ consumers }) rs_syms -- TODO <- starting to question if this is doubling work
               }
           ) $
-          if | v `elem` (var_ref_tail stack) ->
+          if | v `elem` (stack_var_refs stack) ->
                 -- anti-cycle var resolution
                 mempty
              | varString v == "debug#" ->
                 -- DEBUG SYMBOL
                 mempty
-             | Just left_syms <- stack_var_lookup v stack ->  -- TODO URGENT look out for shadowed declarations of other types that don't match (e.g. might have same arity but subtly incompatible types somehow)
+             | Just left_syms <- stack_var_lookup v stack ->  -- TODO look out for shadowed declarations of other types that don't match (e.g. might have same arity but subtly incompatible types somehow)
               mconcat $ map (\sa' ->
                   reduce_deep sa' { -- TODO: check if `reduce_deep` is actually necessary here; might not be because we expect the symbols in the stack to be resolved
                     sa_args = sa_args sa' ++ args', -- ARGS good: elements in the stack are already processed, so if their args are okay these ones are okay

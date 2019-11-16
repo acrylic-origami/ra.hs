@@ -9,6 +9,7 @@ module J where
     readMVar x
   
   bar :: Consumer a
-  bar x = x
+  bar x | True = x
+        | False = bar x
   
   baz f x = f x
