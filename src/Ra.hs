@@ -397,7 +397,8 @@ reduce_deep sa@(SA consumers stack m_sym args thread) =
       
       HsLamCase _ mg -> unravel1 (HsLam NoExt mg <$ sym) []
       
-      HsLam _ mg | matchGroupArity mg <= length args 
+      HsLam _ mg | is_visited stack sa -> mempty
+                 | matchGroupArity mg <= length args 
                  , let next_arg_binds = concatMap ( flip zip (sa_args sa) . m_pats . unLoc ) (unLoc $ mg_alts mg)
                  , Just next_arg_matches <- if length next_arg_binds > 0
                     then and_pat_match_many next_arg_binds -- `and` here because we need to stop evaluating if this alternative doesn't match the input

@@ -30,6 +30,7 @@ module Ra.Lang (
   Pipe,
   Bind,
   ReduceStateMachine(..),
+  is_visited,
   is_parent,
   is_zeroth_kind,
   runIO_expr
