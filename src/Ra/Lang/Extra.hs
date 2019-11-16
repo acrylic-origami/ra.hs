@@ -86,9 +86,15 @@ ppr_pms show' = flip concatMap printers . (("\n===\n"++).) . flip ($) where
 --       VarRefFrame v -> show' v
 --     ) . unSB
 
+ppr_table :: Printer -> SymTable -> String
+ppr_table show' = foldr ((++) . (++"\n\n") . uncurry (++) . (((++", ") . show') *** concatMap (show' . sa_sym))) "" . M.assocs . stbl_table
+
 ppr_stack :: Printer -> Stack -> String
 ppr_stack show' = foldr (\case
-    AppFrame sa syms -> flip (foldr ((++) . (++"\n\n") . uncurry (++) . (((++", ") . show') *** concatMap (show' . sa_sym)))) (M.assocs $ stbl_table syms) . (++"---\n\n")
+    AppFrame sa syms -> (++("---\n\nAF\n" ++ ppr_table show' syms))
+    -- BindFrame syms -> (++("---\n\nBF\n" ++ ppr_table show' syms))
+    BindFrame {} -> (++"---\n\nBF\n")
+    
     _ -> id
   ) "" . unSB
 

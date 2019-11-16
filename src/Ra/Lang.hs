@@ -14,7 +14,6 @@ module Ra.Lang (
   make_stack_key,
   -- make_thread_key,
   stack_apps,
-  stack_var_refs,
   update_head_table,
   ReduceSyms(..),
   PatMatchSyms(..),
@@ -90,8 +89,9 @@ getSymLoc (TupleConstr l) = l
 getSymLoc (ListConstr l) = l
 getSymLoc EntryPoint = noSrcSpan
 
--- instance Eq Sym where
---   (Sym loc1 _) == (Sym loc2 _) = loc1 == loc2
+instance Eq Sym where
+  l == r = getSymLoc l == getSymLoc r
+  
 -- instance Ord Sym where
 --   (Sym loc1 _) <= (Sym loc2 _) = loc1 <= loc2
 
@@ -141,7 +141,7 @@ data SymApp = SA {
   sa_thread :: Maybe SymApp -- TODO consider a more elegant type
 } deriving (Data, Typeable) -- 2D tree. Too bad we can't use Tree; the semantics are totally different
 
-sa_from_sym s = SA mempty mempty s mempty Nothing
+sa_from_sym s = SA mempty (SB mempty) s mempty Nothing
 
 -- instance Eq SymApp where
 --   (==) = curry $ flip all preds . flip ($) where
@@ -186,10 +186,12 @@ pms2rs pms = ReduceSyms {
   rs_stmts = pms_stmts pms
 }
 
-data StackFrame = EmptyFrame | VarRefFrame Id | AppFrame {
+data StackFrame = EmptyFrame | AppFrame {
   af_raw :: SymApp, -- for anti-cycle purposes
   af_syms :: SymTable
-} 
+} | BindFrame {
+  bf_syms :: SymTable
+}
   deriving (Data, Typeable)
 
 -- BOOKMARK: Stack needs to be oufitted with the graph of bindings that refer to each other, in case a hold resolves and a new pattern match works.
@@ -204,27 +206,35 @@ mapSB f = SB . f . unSB
 instance Eq Stack where
   (==) = curry $ uncurry (&&) . (
       uncurry (==) . both length
-      &&& all (uncurry pred) . uncurry zip
-    ) . both unSB where
-    pred (AppFrame { af_raw = l }) (AppFrame { af_raw = r }) = (getSymLoc $ sa_sym l) == (getSymLoc $ sa_sym r) -- don't push the equality recursion any further
-    pred (VarRefFrame l) (VarRefFrame r) = l == r
-    pred _ _ = False
+      &&& all (uncurry (==) . both (getSymLoc . sa_sym . af_raw)) . uncurry zip
+    ) . both stack_apps -- where
+    -- pred (AppFrame { af_raw = l }) (AppFrame { af_raw = r }) = (getSymLoc $ sa_sym l) == ( r) -- don't push the equality recursion any further
+    -- pred (VarRefFrame l) (VarRefFrame r) = l == r
+    -- pred (BindFrame {}) (BindFrame {}) = True -- TODO dubious
+    -- pred _ _ = False
 
 is_parent = undefined
 -- is_parent p q = SB (take (length (unSB q)) (unSB p)) == q
 
-instance Semigroup Stack where
-  (<>) =
-    let combine (Just a) (Just b) = assert (af_raw a == af_raw b) (a {
-            af_syms = (af_syms a <> af_syms b)
-          }) -- prefer first (accumulating) stack
-        combine Nothing (Just b) = b
-        combine (Just a) Nothing = a
-    in curry $ SB . map (uncurry combine) . uncurry zipAll . both unSB
+is_visited :: Stack -> SymApp -> Bool
+is_visited sb sa = any (\case
+    AppFrame { af_raw } -> (sa_sym af_raw) == (sa_sym sa)
+    _ -> False
+  ) (unSB sb)
 
-instance Monoid Stack where
-  mempty = SB mempty
-  mappend = (<>)
+
+-- instance Semigroup Stack where
+--   (<>) =
+--     let combine (Just a) (Just b) = assert (af_raw a == af_raw b) (a {
+--             af_syms = (af_syms a <> af_syms b)
+--           }) -- prefer first (accumulating) stack
+--         combine Nothing (Just b) = b
+--         combine (Just a) Nothing = a
+--     in curry $ SB . map (uncurry combine) . uncurry zipAll . both unSB
+
+-- instance Monoid Stack where
+--   mempty = SB mempty
+--   mappend = (<>)
 
 instance Semigroup ReduceSyms where
   (ReduceSyms lsyms lstmts) <> (ReduceSyms rsyms  rstmts) = ReduceSyms (lsyms <> rsyms) (lstmts <> rstmts) -- is there a nicer way to do this?
@@ -288,9 +298,6 @@ make_stack_key = uncurry (:) . (
 stack_apps :: Stack -> [StackFrame]
 stack_apps = filter (\case { AppFrame {} -> True; _ -> False }) . unSB
 
-stack_var_refs :: Stack -> [Id]
-stack_var_refs = catMaybes . map (\case { VarRefFrame v -> Just v; _ -> Nothing }) . unSB
-
 -- stack_var_refs used for the law that var resolution cycles only apply to the tail
 -- stack_var_refs :: Stack -> [Id]
 -- stack_var_refs = stack_var_refs' . unSB where
@@ -309,8 +316,11 @@ table_lookup v tbl = uncurry (<|>) $ (
   ) tbl
 
 stack_var_lookup :: Id -> Stack -> Maybe [SymApp]
-stack_var_lookup v = foldr (\case
-    AppFrame { af_syms } -> (<|>(table_lookup v (stbl_table af_syms)))
+stack_var_lookup v =
+  let lookup = flip (<|>) . table_lookup v . stbl_table
+  in foldr (\case
+    AppFrame { af_syms } -> lookup af_syms
+    BindFrame { bf_syms } -> lookup bf_syms
     _ -> id
   ) Nothing . unSB
 

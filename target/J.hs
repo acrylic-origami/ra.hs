@@ -10,6 +10,5 @@ module J where
   
   bar :: Consumer a
   bar x | True = x
-        | False = bar x
   
   baz f x = f x

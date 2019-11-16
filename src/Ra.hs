@@ -28,13 +28,18 @@ import Control.Arrow ( first, second, (***), (&&&) )
 import Data.Function ( (&) )
 import Data.Maybe ( catMaybes, fromMaybe, maybeToList, isNothing )
 import Data.Data ( toConstr, Data(..), Typeable(..) )
-import Data.Generics ( everywhere, everywhereBut, GenericT(), mkQ, mkT, extQ, extT )
+import Data.Generics ( everywhere, everywhereBut, GenericT(), everything, everythingBut, GenericQ(), mkQ, mkT, extQ, extT )
 import Data.Generics.Extra ( constr_ppr, everywhereWithContextBut, extQT, mkQT )
 import Data.Semigroup ( (<>) )
 import Data.Monoid ( mempty, mconcat )
 import Control.Monad ( join, guard, foldM )
 import Control.Applicative ( (<|>), liftA2 )
 import Control.Exception ( assert )
+
+import Data.Tree ( levels )
+import Data.Graph.Inductive.PatriciaTree ( Gr(..) )
+import Data.Graph.Inductive.Query.DFS ( dff )
+import Data.Graph.Inductive.NodeMap ( mkMapGraph, mkNodes )
 
 import Data.Map.Strict ( Map(..), unionsWith, unions, unionWith, union, singleton, (!?), (!), foldlWithKey, foldrWithKey, keys, mapWithKey, assocs)
 import qualified Data.Map.Strict as M ( null, member, empty, insert, map, elems )
@@ -49,18 +54,6 @@ import Ra.Lang
 import Ra.Extra
 import Ra.Lang.Extra
 import Ra.Refs ( write_funs, read_funs )
-
-pat_match_zip ::
-  [LPat GhcTc]
-  -> [[SymApp]]
-  -> Maybe (Map Id [SymApp])
-pat_match_zip pats args =
-  foldM (
-      curry $ uncurry fmap . (
-          unionWith (++)
-          *** uncurry ((mconcat.) . map . pat_match_one) -- Maybe (Map Id [SymApp]), with OR mechanics: if one arg alternative fails, the others will try to take its place
-        )
-    ) mempty $ zip pats args
 
 pat_match_one ::
   LPat GhcTc
@@ -95,7 +88,7 @@ pat_match_one pat sa =
     -------------------------------
     -- +++ MATCHING PATTERNS +++ --
     -------------------------------
-    TuplePat _ pats _ | TupleConstr _ <- sa_sym sa -> pat_match_zip pats (sa_args sa)
+    TuplePat _ pats _ | TupleConstr _ <- sa_sym sa -> and_pat_match_many (zip pats (sa_args sa))
                       | otherwise -> mempty -- error $ "Argument on explicit tuple. Perhaps a tuple section, which isn't supported yet. PPR:\n" ++ (ppr_sa ppr_unsafe sa)
                       
     ConPatOut { pat_con, pat_args = d_pat_args } -> case unLoc pat_con of
@@ -108,7 +101,7 @@ pat_match_one pat sa =
                           sa_args = []
                         }]) args'') ++ sa_args sa) -- STACK good: this decomposition is not a function application so the stack stays the same
                             -- NOTE this is the distributivity of `consumers` onto subdata of a datatype, as well as the stack
-                              in pat_match_zip pats flat_args
+                              in and_pat_match_many (zip pats flat_args)
                        | otherwise -> Nothing
       
         InfixCon l r -> if ":" == (occNameString $ nameOccName $ dataConName pat_con')
@@ -148,26 +141,18 @@ pat_match binds =
       sub t sa = -- assumes incoming term is a normal form
         let subbed_sa = sub_sa_types_wo_stack sa sa -- really hope this works
         in case sa_sym subbed_sa of
-          Sym (L _ (HsVar _ (L _ v))) -> if not $ v `elem` (stack_var_refs $ sa_stack subbed_sa)
-            then (
-                  mconcat
-                  -- . map (\rs' ->
-                  --     let rss' = map (sub t) (rs_syms rs')
-                  --     in map (uncurry (id )) (zip rss' (rs_syms rs')))
-                  . map (\sa' ->
-                      reduce_deep
-                        $ everywhereBut
-                            (False `mkQ` (const True :: Stack -> Bool))
-                            (mkT $ \sa -> sa {
-                              sa_stack = mapSB ((VarRefFrame v):) (sa_stack sa)
-                            })
-                        $ sa' {
-                          sa_args = (sa_args sa') <> (sa_args subbed_sa)
-                        }
-                    )
-                )
-              <$> (table_lookup v t)
-            else Nothing
+          Sym (L loc (HsVar _ (L _ v))) -> (
+                mconcat
+                -- . map (\rs' ->
+                --     let rss' = map (sub t) (rs_syms rs')
+                --     in map (uncurry (id )) (zip rss' (rs_syms rs')))
+                . map (\sa' ->
+                    reduce_deep sa' {
+                        sa_args = (sa_args sa') <> (sa_args subbed_sa)
+                      }
+                  )
+              )
+            <$> (snd $ (sa, table_lookup v t)) -- DEBUG
           _ -> Nothing
       
       iterant :: PatMatchSyms -> (Bool, PatMatchSyms)
@@ -188,7 +173,7 @@ pat_match binds =
                                       . (sub next_table &&& id)
                                     )
                                 )
-                                -- `extQT` (const (Q Nothing) :: Stack -> Q ReduceSyms Stack)
+                                `extQT` (const (Q Nothing) :: Stack -> Q (Maybe ReduceSyms) Stack)
                             )
                           ) mempty pms
                     in (
@@ -201,19 +186,47 @@ pat_match binds =
                   | otherwise = (True, pms)    
       
       (rs0, binds0) = first mconcat $ unzip $ map ((\(pat, rs) -> (rs, (pat, rs_syms rs))) . second (mconcat . map reduce_deep)) binds -- don't assume any symapps coming in are NF
-      (True, pmsn) = until fst (iterant . snd) (False, PatMatchSyms {
+      max_iter :: Int
+      max_iter =
+        let get_ids = everythingBut (<>) (
+              ([], False)
+              `mkQ` ((,False) . pure :: Id -> ([Id], Bool))
+              `extQ` (const ([], True) :: Stack -> ([Id], Bool)))
+            binds = concatMap (
+                (\(patvars, expvars) -> [
+                    (patvar, expvar, ())
+                  | patvar <- patvars
+                  , expvar <- expvars ])
+                . ( get_ids &&& get_ids )
+              ) binds0
+            nodes = map (\(x,_,_) -> x) binds
+            gr :: Gr Id ()
+            (gr, nodemap) = mkMapGraph nodes binds
+        in foldl max 0 $ map (length . levels) $ dff (map fst $ fst $ mkNodes nodemap nodes) gr
+        
+      (_, (iter, (_, pmsn))) = (binds, until
+        (uncurry (||) . ((>=max_iter) . fst &&& fst . snd))
+        ((+1) *** (iterant . snd))
+        (0, (False, PatMatchSyms {
             pms_stmts = rs_stmts rs0,
             pms_syms = mempty {
               stbl_binds = binds0
             }
-          })
-    in pmsn {
-      pms_syms = (pms_syms pmsn) {
-        stbl_table = if length (stbl_binds (pms_syms pmsn)) > 0
-          then fromMaybe mempty (or_pat_match_many (stbl_binds (pms_syms pmsn))) -- `or` here because scattered bindings
+          })))
+      
+      tie_to_table :: Data d => d -> d
+      tie_to_table = mkT (\sa -> sa {
+          sa_stack = mapSB ((BindFrame next_table):) (sa_stack sa) -- TODO check if `sa` is a good choice to put in the AppFrame. Could work -- only needed for deduping
+        })
+      
+      next_table = everywhereBut (False `mkQ` (const True :: Stack -> Bool)) tie_to_table (pms_syms pmsn) {
+        stbl_table = if length (stbl_binds next_table) > 0
+          then fromMaybe mempty (or_pat_match_many (stbl_binds next_table)) -- `or` here because scattered bindings
           else mempty
-      }
-    }
+      } -- TODO URGENT this is pretty ugly, find a better way to avoid twice the work
+  in (snd (binds0, everywhereBut (False `mkQ` (const True :: Stack -> Bool)) tie_to_table (pmsn { pms_syms = mempty }))) {
+    pms_syms = next_table 
+  } -- DEBUG
 
 reduce :: ReduceSyms -> [ReduceSyms]
 reduce syms0 =
@@ -241,7 +254,7 @@ reduce syms0 =
       iterant rs =
         let
             writes = catMaybes $ map (\sa -> case sa_sym sa of
-                Sym (L _ (HsVar _ v)) | varString (unLoc v) == "putMVar"
+                Sym (L _ (HsVar _ (L _ v))) | varString v == "putMVar"
                                       , (pipes:vals:_) <- sa_args sa
                                       -> Just (pipes, vals)
                 _ -> Nothing) (rs_stmts rs)
@@ -412,7 +425,7 @@ reduce_deep sa@(SA consumers stack m_sym args thread) =
                         ) next_exprs) -- TODO check if the sym record update + args are correct for this stage
                  | otherwise -> terminal
             
-      HsVar _ (L loc v) ->
+      HsVar _ (L _ v) ->
         let args' | arg1:rest <- args
                   , Just "Consumer" <- varTyConName v
                     = (map (\b -> b { sa_consumers = make_stack_key sa : (sa_consumers b) }) arg1) : rest -- identify as consumer-consumed values
@@ -424,17 +437,13 @@ reduce_deep sa@(SA consumers stack m_sym args thread) =
                 rs_syms = map (\sa' -> sa' { sa_consumers = sa_consumers sa' ++ consumers }) rs_syms -- TODO <- starting to question if this is doubling work
               }
           ) $
-          if | v `elem` (stack_var_refs stack) ->
-                -- anti-cycle var resolution
-                mempty
-             | varString v == "debug#" ->
+          if | varString v == "debug#" ->
                 -- DEBUG SYMBOL
                 mempty
-             | Just left_syms <- stack_var_lookup v stack ->  -- TODO look out for shadowed declarations of other types that don't match (e.g. might have same arity but subtly incompatible types somehow)
+             | Just left_syms <- snd (sa, stack_var_lookup v stack) -> -- DEBUG -- TODO look out for shadowed declarations of other types that don't match (e.g. might have same arity but subtly incompatible types somehow)
               mconcat $ map (\sa' ->
                   reduce_deep sa' { -- TODO: check if `reduce_deep` is actually necessary here; might not be because we expect the symbols in the stack to be resolved
-                    sa_args = sa_args sa' ++ args', -- ARGS good: elements in the stack are already processed, so if their args are okay these ones are okay
-                    sa_stack = mapSB ((VarRefFrame v):) (sa_stack sa')
+                    sa_args = sa_args sa' ++ args' -- ARGS good: elements in the stack are already processed, so if their args are okay these ones are okay
                   }
                 ) left_syms
              | otherwise -> case varString v of
@@ -496,10 +505,10 @@ reduce_deep sa@(SA consumers stack m_sym args thread) =
       HsPar _ v -> unravel1 v []
       SectionL _ v m_op -> unravel1 m_op [[v]]
       SectionR _ m_op v | length args > 0 -> -- need to check fo arguments because that's the only way we're going to enforce the flipping
-                          let L _ (HsVar _ op) = unHsWrap m_op
+                          let L _ (HsVar _ (L _ op)) = unHsWrap m_op
                               nf_arg1_syms = reduce_deep sa { sa_sym = Sym v, sa_args = [] }
                               arg0:args_rest = args
-                          in case stack_var_lookup (unLoc op) stack of
+                          in case stack_var_lookup op stack of
                             Just stack_exprs ->
                               mappend nf_arg1_syms { rs_syms = [] } $ mconcat $ map (\sa' ->
                                 reduce_deep $ sa' {
