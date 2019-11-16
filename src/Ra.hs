@@ -192,20 +192,22 @@ pat_match binds =
               ([], False)
               `mkQ` ((,False) . pure :: Id -> ([Id], Bool))
               `extQ` (const ([], True) :: Stack -> ([Id], Bool)))
-            binds = concatMap (
+            flat_binds = concatMap (
                 (\(patvars, expvars) -> [
                     (patvar, expvar, ())
                   | patvar <- patvars
                   , expvar <- expvars ])
                 . ( get_ids &&& get_ids )
               ) binds0
-            nodes = map (\(x,_,_) -> x) binds
+            nodes = map (\(x,_,_) -> x) flat_binds
             gr :: Gr Id ()
-            (gr, nodemap) = mkMapGraph nodes binds
+            (gr, nodemap) = mkMapGraph nodes flat_binds
         in foldl max 0 $ map (length . levels) $ dff (map fst $ fst $ mkNodes nodemap nodes) gr
         
+      pred (count, t) = (count >= max_iter) || fst t
+      
       (_, (iter, (_, pmsn))) = (binds, until
-        (uncurry (||) . ((>=max_iter) . fst &&& fst . snd))
+        pred
         ((+1) *** (iterant . snd))
         (0, (False, PatMatchSyms {
             pms_stmts = rs_stmts rs0,
@@ -247,7 +249,7 @@ reduce syms0 =
                       uncurry (&&)
                       . (
                           elem (getSymLoc $ sa_sym sa) . map (getSymLoc . sa_sym)
-                          &&& (elem (sa_stack sa)) . map sa_stack
+                          &&& (elem (sa_loc sa)) . map sa_loc
                         ) . fst
                     ) ws -- by only taking `w_sym`, encode the law that write threads are not generally the threads that read (obvious saying it out loud, but it does _look_ like we're losing information here)
                 "readMVar" | length m_next_args > 0 -> head m_next_args -- list of pipes from the first arg
@@ -375,7 +377,7 @@ reduce_deep :: SymApp -> ReduceSyms
 reduce_deep sa | let args = sa_args sa
                      sym = sa_sym sa
                , length args > 0 && is_zeroth_kind sym = error $ "Application on " ++ (show $ toConstr sym)
-reduce_deep sa@(SA consumers stack m_sym args thread) =
+reduce_deep sa@(SA consumers locstack stack m_sym args thread) =
   -------------------
   -- SYM BASE CASE --
   -------------------
@@ -422,12 +424,14 @@ reduce_deep sa@(SA consumers stack m_sym args thread) =
                             stbl_binds = next_arg_binds
                           } <> next_explicit_binds)
                         next_stack = mapSB (next_frame:) stack
+                        next_loc = mapSB (next_frame:) locstack
                         next_args = drop (matchGroupArity mg) args
                     in mempty {
                       rs_stmts = pms_stmts bind_pms
                     }
                       <> (mconcat $ map (\next_expr ->
                           reduce_deep sa {
+                            sa_loc = next_loc,
                             sa_stack = next_stack,
                             sa_sym = Sym next_expr,
                             sa_args = next_args
@@ -438,7 +442,7 @@ reduce_deep sa@(SA consumers stack m_sym args thread) =
       HsVar _ (L _ v) ->
         let args' | arg1:rest <- args
                   , Just "Consumer" <- varTyConName v
-                    = (map (\b -> b { sa_consumers = make_stack_key sa : (sa_consumers b) }) arg1) : rest -- identify as consumer-consumed values
+                    = (map (\b -> b { sa_consumers = make_loc_key sa : (sa_consumers b) }) arg1) : rest -- identify as consumer-consumed values
                      -- TODO refactor with lenses
                   | otherwise = args
             terminal' = mempty { rs_syms = [sa { sa_args = args' }] }
@@ -453,7 +457,9 @@ reduce_deep sa@(SA consumers stack m_sym args thread) =
              | Just left_syms <- snd (sa, stack_var_lookup v stack) -> -- DEBUG -- TODO look out for shadowed declarations of other types that don't match (e.g. might have same arity but subtly incompatible types somehow)
               mconcat $ map (\sa' ->
                   reduce_deep sa' { -- TODO: check if `reduce_deep` is actually necessary here; might not be because we expect the symbols in the stack to be resolved
-                    sa_args = sa_args sa' ++ args' -- ARGS good: elements in the stack are already processed, so if their args are okay these ones are okay
+                    sa_args = sa_args sa' <> args', -- ARGS good: elements in the stack are already processed, so if their args are okay these ones are okay
+                    sa_stack = mapSB (<>(unSB stack)) (sa_stack sa')
+                    -- NOTE sa_loc isn't changed
                   }
                 ) left_syms
              | otherwise -> case varString v of
@@ -536,11 +542,13 @@ reduce_deep sa@(SA consumers stack m_sym args thread) =
                 pms_stmts = bind_stmts
               } = pat_match $ grhs_binds rhss
             next_exprs = grhs_exprs rhss
+            next_frame = AppFrame sa next_explicit_binds
         in mempty { rs_stmts = bind_stmts }
           <> (mconcat $ map (\next_expr ->
               reduce_deep sa {
                 sa_sym = Sym next_expr,
-                sa_stack = mapSB ((AppFrame sa next_explicit_binds):) stack
+                sa_stack = mapSB (next_frame:) stack,
+                sa_loc = mapSB (next_frame:) locstack
               }) next_exprs) -- TODO check that record update with sym (and its location) is the right move here
         
       HsLet _ _ expr -> unravel1 expr [] -- assume local bindings already caught by surrounding function body (HsLam case)

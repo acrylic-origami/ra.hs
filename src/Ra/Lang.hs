@@ -11,7 +11,7 @@ module Ra.Lang (
   mapSB,
   stack_var_lookup,
   table_lookup,
-  make_stack_key,
+  make_loc_key,
   -- make_thread_key,
   stack_apps,
   update_head_table,
@@ -133,6 +133,7 @@ type Pipe = SymApp -- LHsExpr GhcTc
 
 data SymApp = SA {
   sa_consumers :: [StackKey],
+  sa_loc :: Stack,
   sa_stack :: Stack,
     -- laws for `consumers`:
     -- 1. if a term is consumed and decomposed or part of an unknown/partial application, the whole term is consumed under the same consumer[s]
@@ -142,7 +143,7 @@ data SymApp = SA {
   sa_thread :: Maybe SymApp -- TODO consider a more elegant type
 } deriving (Data, Typeable) -- 2D tree. Too bad we can't use Tree; the semantics are totally different
 
-sa_from_sym s = SA mempty (SB mempty) s mempty Nothing
+sa_from_sym s = SA mempty (SB mempty) (SB mempty) s mempty Nothing
 
 -- instance Eq SymApp where
 --   (==) = curry $ flip all preds . flip ($) where
@@ -284,16 +285,16 @@ is_zeroth_kind _ = False
 -- make_thread_key stack = undefined 
 {- TKNormal $
   if not $ null $ st_thread stack
-    then drop ((length $ unSB stack) - (head $ st_thread stack)) $ make_stack_key stack
+    then drop ((length $ unSB stack) - (head $ st_thread stack)) $ make_loc_key stack
     else mempty -}
 
-make_stack_key :: SymApp -> StackKey
-make_stack_key = uncurry (:) . (
+make_loc_key :: SymApp -> StackKey
+make_loc_key = uncurry (:) . (
     getSymLoc . sa_sym
     &&& catMaybes . map (\case
         AppFrame { af_raw } -> Just $ getSymLoc $ sa_sym af_raw
         _ -> Nothing
-      ) . unSB . sa_stack -- map fst . unSB
+      ) . unSB . sa_loc -- map fst . unSB
   )
 
 stack_apps :: Stack -> [StackFrame]

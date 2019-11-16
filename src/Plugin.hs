@@ -67,7 +67,7 @@ module Plugin (frontendPlugin) where
           . uncurry (flip (map . ($))) -- [Map StackKey [SymApp] -> Map StackKey [SymApp]]
           . (
             map (\sa -> case sa_sym sa of
-                Sym (L _ (HsVar _ v)) | (varString $ unLoc v) == "newEmptyMVar" -> Just $ make_stack_key sa
+                Sym (L _ (HsVar _ (L _ v))) | varString v == "newEmptyMVar" -> Just $ make_loc_key sa
                 _ -> Nothing
               ) -- [StackKey]
             *** (\v m_k -> case m_k of

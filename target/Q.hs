@@ -1,7 +1,7 @@
 module Q where
   import Control.Concurrent.MVar
   foo =
-    let f _ = 42
+    let f _ = g ()
         g _ = f () -- CRAP.
     in g ()
   -- foo = do

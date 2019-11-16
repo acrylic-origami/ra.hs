@@ -11,7 +11,7 @@ import Data.Generics ( GenericQ, mkQ, extQ, everythingBut)
 import Data.Generics.Extra ( shallowest, constr_ppr )
 import Control.Arrow ( (&&&) )
 
-import Ra.Lang -- ( Stack(..), SymApp(..), Sym(..), SymTable(..), PatMatchSyms(..), ReduceSyms(..), Stack(..), unSB, mapSB, union_sym_tables, make_stack_key )
+import Ra.Lang -- ( Stack(..), SymApp(..), Sym(..), SymTable(..), PatMatchSyms(..), ReduceSyms(..), Stack(..), unSB, mapSB, union_sym_tables, make_loc_key )
 import Ra.GHC.Util ( grhs_exprs )
 import Ra.Extra
 

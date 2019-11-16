@@ -42,8 +42,8 @@ ppr_sa show' = go 0 where
                       . concatMap (go (n+1))
                     ) . sa_args
                   &&& uncurry (++) . (
-                      show' . make_stack_key
-                      &&& fromMaybe "BASE" . fmap (show' . make_stack_key) . sa_thread
+                      show' . make_loc_key
+                      &&& fromMaybe "BASE" . fmap (show' . make_loc_key) . sa_thread
                     )
                 )
             )
