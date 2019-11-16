@@ -239,8 +239,17 @@ reduce syms0 =
                              sa_args = map (concatMap rs_syms) m_next_args
                            }] }
             expanded = mconcat $ case sa_sym sa of
-              Sym (L _ (HsVar _ v)) -> case varString $ unLoc v of
-                "newEmptyMVar" -> map (expand_reads ws) $ concatMap snd $ filter ((elem sa) . fst) ws -- by only taking `w_sym`, encode the law that write threads are not generally the threads that read (obvious saying it out loud, but it does _look_ like we're losing information here)
+              Sym (L _ (HsVar _ (L _ v))) -> case varString v of
+                "newEmptyMVar" ->
+                  map (expand_reads ws)
+                  $ concatMap snd
+                  $ filter (
+                      uncurry (&&)
+                      . (
+                          elem (getSymLoc $ sa_sym sa) . map (getSymLoc . sa_sym)
+                          &&& (elem (sa_stack sa)) . map sa_stack
+                        ) . fst
+                    ) ws -- by only taking `w_sym`, encode the law that write threads are not generally the threads that read (obvious saying it out loud, but it does _look_ like we're losing information here)
                 "readMVar" | length m_next_args > 0 -> head m_next_args -- list of pipes from the first arg
                 _ -> []
               _ -> []
