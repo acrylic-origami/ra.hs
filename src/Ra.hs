@@ -105,7 +105,7 @@ pat_match_one pat sa =
                        | otherwise -> Nothing
       
         InfixCon l r -> if ":" == (occNameString $ nameOccName $ dataConName pat_con')
-          then case sa_sym sa of -- special-case list decomp because lists have their own constr syntax
+          then case sa_sym sa of -- TODO URGENT test this -- special-case list decomp because lists have their own constr syntax
             ListConstr _ -> if length (sa_args sa) > 0
               then (or_pat_match_many (zip (repeat l) (sa_args sa))) <> (pat_match_one r sa) -- `or` here because any member of the list can work -- `union` mechanics are fine here because the bound names can't be shared between head and tail
               else Nothing
@@ -234,16 +234,18 @@ reduce :: ReduceSyms -> [ReduceSyms]
 reduce syms0 =
   let expand_reads :: Writes -> SymApp -> ReduceSyms
       expand_reads ws sa =
-        let m_next_args = map (map (\sa' ->
+        let m_next_args :: [ReduceSyms]
+            m_next_args = map (mconcat . map (\sa' ->
                 lift_rs_syms2 list_alt (expand_reads ws sa') (mempty { rs_syms = [sa'] })
               )) (sa_args sa)
             next_argd_sym = mempty { rs_syms = [sa {
-                             sa_args = map (concatMap rs_syms) m_next_args
-                           }] }
-            expanded = mconcat $ case sa_sym sa of
+               sa_args = map rs_syms m_next_args
+             }] }
+            expanded = case sa_sym sa of
               Sym (L _ (HsVar _ (L _ v))) -> case varString v of
                 "newEmptyMVar" ->
-                  map (expand_reads ws)
+                  mconcat 
+                  $ map (expand_reads ws)
                   $ concatMap snd
                   $ filter (
                       uncurry (&&)
@@ -252,10 +254,14 @@ reduce syms0 =
                           &&& (elem (sa_loc sa)) . map sa_loc
                         ) . fst
                     ) ws -- by only taking `w_sym`, encode the law that write threads are not generally the threads that read (obvious saying it out loud, but it does _look_ like we're losing information here)
-                "readMVar" | length m_next_args > 0 -> head m_next_args -- list of pipes from the first arg
-                _ -> []
-              _ -> []
-        in (((mconcat $ mconcat m_next_args) { rs_syms = mempty })<>) 
+                "readMVar" | arg0_rs:rest_rs <- m_next_args -> (\rs -> rs {
+                  rs_syms = map (\sa -> sa {
+                      sa_args = sa_args sa <> map rs_syms rest_rs
+                    }) (rs_syms rs)
+                }) arg0_rs <> (mconcat $ rest_rs) { rs_syms = mempty } -- list of pipes from the first arg
+                _ -> mempty
+              _ -> mempty
+        in (((mconcat m_next_args) { rs_syms = mempty })<>) 
           $ mconcat $ map reduce_deep 
           $ rs_syms $ lift_rs_syms2 list_alt expanded next_argd_sym -- a bunch of null handling that looks like a mess because it is
         -- STACK good: relies on the pipe stack being correct
@@ -417,7 +423,10 @@ reduce_deep sa@(SA consumers locstack stack m_sym args thread) =
                  -> let bind_pms@(PatMatchSyms {
                             pms_syms = next_explicit_binds,
                             pms_stmts = bind_stmts
-                          }) = pat_match $ grhs_binds mg -- STACK questionable: do we need the new symbol here? Shouldn't it be  -- localize binds correctly via pushing next stack location
+                          }) = pat_match $ map (second (map (\sa -> sa {
+                            sa_stack = stack,
+                            sa_loc = locstack
+                          }))) $ grhs_binds mg -- STACK questionable: do we need the new symbol here? Shouldn't it be  -- localize binds correctly via pushing next stack location
                         next_exprs = sub_sa_types_wo_stack sa $ grhs_exprs $ map (grhssGRHSs . m_grhss . unLoc) $ unLoc $ mg_alts mg
                         next_frame = AppFrame sa (SymTable {
                             stbl_table = next_arg_matches,
