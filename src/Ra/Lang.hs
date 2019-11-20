@@ -1,4 +1,4 @@
-{-# LANGUAGE TupleSections, DeriveFunctor, DeriveDataTypeable, LambdaCase, NamedFieldPuns #-}
+{-# LANGUAGE Rank2Types, TupleSections, DeriveFunctor, DeriveDataTypeable, LambdaCase, NamedFieldPuns #-}
 module Ra.Lang (
   Sym(..),
   getSymLoc,
@@ -23,6 +23,8 @@ module Ra.Lang (
   lift_rs_syms2,
   SymApp(..),
   sa_from_sym,
+  sub_sa_types_T,
+  sub_sa_types_wo_stack,
   Write,
   Writes(..),
   DoStmt(..),
@@ -37,8 +39,14 @@ module Ra.Lang (
 ) where
 
 import GHC
-import Var ( varName, varType )
+import Var ( varName, varType, setVarType )
+import Type ( mkFunTys, mkAppTy, mkAppTys, splitFunTys, getTyVar_maybe, dropForAlls )
+import TyCon ( tyConName )
+
+-- for WildPat synthesis
 import Type ( eqType )
+import ConLike ( ConLike(..) )
+import DataCon ( DataCon(..), dataConRepType )
 import qualified Pretty ( empty, text )
 import Outputable ( showPpr, Outputable(..), docToSDoc )
 
@@ -51,14 +59,16 @@ import Var ( mkLocalVar )
 import IdInfo ( vanillaIdInfo, IdDetails(VanillaId) )
 
 import Data.Data ( Data(..), Typeable(..) )
-import Control.Arrow ( second, (***), (&&&) )
+import Control.Arrow ( first, second, (***), (&&&) )
+import Control.Monad ( join )
 import Data.Coerce ( coerce )
 import Data.Map.Strict ( Map(..), empty, union, unionWith, unionsWith, toList, fromList, (!?), filterWithKey, elems )
 import qualified Data.Map.Strict as M ( map )
+import Data.Generics ( everywhere, everywhereBut, everything, GenericT, extT, mkT, mkQ )
 import Data.Set ( Set(..) )
 import Data.Semigroup ( Semigroup(..), (<>) )
 import Data.Monoid ( Monoid(..), mempty, mconcat )
-import Data.Maybe ( listToMaybe, catMaybes, isJust )
+import Data.Maybe ( listToMaybe, catMaybes, isJust, fromMaybe )
 import Control.Applicative ( (<|>) )
 import Control.Exception ( assert )
 
@@ -145,6 +155,78 @@ data SymApp = SA {
 
 sa_from_sym s = SA mempty (SB mempty) (SB mempty) s mempty Nothing
 
+get_sa_type :: SymApp -> Type -- FYI this is the type _after_ reduction; i.e. apps and sections go down an arity, OpApps go down two. The law: this preserves types of all terminal symbols (see HsLam[Case], HsVar, Hs[Over]Lit, ExplicitTuple, ExplicitList)
+get_sa_type sa =
+  let get_expr_type = get_sa_type . sa_from_sym . Sym
+  in case sa_sym sa of
+    Sym sym -> case unLoc sym of
+      -- TERMINAL SYMBOLS
+      HsLamCase _ mg -> get_mg_type mg
+      HsLam _ mg -> get_mg_type mg
+      HsVar _ (L _ v) -> varType v
+      HsOverLit _ _ -> blank_type
+      HsLit _ _ -> blank_type
+      ExplicitTuple _ args _ -> mkAppTys (error "Report this bug: too lazy to make actual Tuple TyCon.") (map (\case
+            L _ (Present _ expr) -> get_expr_type expr
+            _ -> error "Tuple sections not yet supported"
+          ) args)
+      ExplicitList ty _ _ -> ty
+      HsConLikeOut _ (RealDataCon con) -> dataConRepType con -- TODO what's a PatSynCon again?
+      
+      -- NON-TERMINAL SYMBOLS
+      -- NOTE: none of these should actually ever be called, because we should always have normal forms at instance resolution
+      HsApp _ l _ -> uncurry mkFunTys $ first tail $ splitFunTys $ dropForAlls $ get_expr_type l
+      OpApp _ _ op _ -> uncurry mkFunTys $ first (tail . tail) $ splitFunTys $ dropForAlls $ get_expr_type op
+      HsWrap _ _ expr -> get_expr_type $ L (getLoc sym) expr
+      NegApp _ expr _ -> get_expr_type expr
+      HsPar _ expr -> get_expr_type expr
+      SectionL _ _ op -> uncurry mkFunTys $ first tail $ splitFunTys $ dropForAlls $ get_expr_type op
+      SectionR _ op _ ->
+        let op_ty = get_expr_type op
+            (arg_tys, res_ty) = splitFunTys $ dropForAlls op_ty
+        in if length arg_tys > 0
+          then mkFunTys (uncurry (:) $ (head &&& tail . tail) arg_tys) res_ty
+          else undefined -- error $ (ppr_unsafe op_ty ++ "\n---\n" ++ constr_ppr op_ty)
+      HsCase _ _ mg -> get_mg_type mg
+      HsIf _ _ _ a _b -> get_expr_type a -- assume a ~ _b
+      HsMultiIf ty _ -> ty
+      HsLet _ _ ret -> get_expr_type ret
+      HsDo ty _ _ -> ty
+      -- _ -> error $ constr_ppr sym
+      
+    TupleConstr _ -> mkAppTys (error "Report this bug: too lazy to make actual Tuple TyCon.") (map (get_sa_type . head) (sa_args sa))
+    ListConstr _ -> mkAppTy (error "Report this bug: too lazy to make actual list TyCon.") (get_sa_type $ head $ head $ sa_args sa)
+    EntryPoint -> error "Tried to get the type of EntryPoint"
+
+
+sub_sa_types_T :: SymApp -> GenericT
+sub_sa_types_T sa =
+  let sa_ty = get_sa_type sa
+      -- TODO URGENT rip through all "wrappers" (foralls and contexts) to get to the true return type, assuming a saturated application... which is wrong for unsaturated cases. Instead, it really should be an argument-by-argument decomp, which suggests we should write a function that deapps in type space
+      sa_fun_ret_ty = dig_ret_ty sa_ty where
+        dig_ret_ty ty =
+          let (arg_tys, rhs) = splitFunTys $ dropForAlls ty
+          in if null $ arg_tys
+            then rhs -- drop forall
+            else dig_ret_ty rhs
+      type_map = fromMaybe mempty $ inst_subty sa_ty (mkFunTys (map (reduce_types . head) (sa_args sa)) sa_fun_ret_ty) -- beta-reduce all types in the left-hand sides
+      tx :: GenericT
+      tx = mkT (
+          (\x ->
+              fromMaybe x (join $ fmap (type_map!?) $ getTyVar_maybe x)
+            ) -- DEBUG
+        )
+  in snd (sa, tx `extT` ((\expr -> case expr of -- DEBUG
+      L vloc (HsVar x (L loc v)) -> L vloc (HsVar x (L loc (setVarType v (everywhere tx $ varType v)))) -- DEBUG
+      _ -> expr
+    ) :: LHsExpr GhcTc -> LHsExpr GhcTc))
+
+sub_sa_types_wo_stack :: SymApp -> GenericT
+sub_sa_types_wo_stack sa = everywhereBut (False `mkQ` (const True :: Stack -> Bool)) (sub_sa_types_T sa)
+  
+reduce_types :: SymApp -> Type
+reduce_types sa = uncurry mkFunTys $ everywhere (sub_sa_types_T sa) $ first (drop (length $ sa_args sa)) $ splitFunTys $ dropForAlls $ get_sa_type sa
+  
 -- instance Eq SymApp where
 --   (==) = curry $ flip all preds . flip ($) where
 --     preds = [

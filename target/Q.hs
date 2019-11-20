@@ -10,5 +10,5 @@ module Q where
             g <- readMVar p
             g ()
           )
-    putMVar p f
+    putMVar p (\_ -> return 42)
     f ()

@@ -12,6 +12,7 @@ module Ra.GHC.Util (
   blank_name,
   blank_type,
   blank_id,
+  get_mg_type,
   inst_subty
 ) where
 
@@ -26,7 +27,7 @@ import OccName ( mkVarOcc, occNameString )
 import Bag
 
 -- for blank_id
-import Type ( mkTyVarTy )
+import Type ( mkTyVarTy, mkFunTys )
 import Name ( mkSystemName )
 import OccName ( mkVarOcc )
 import Unique ( mkVarOccUnique )
@@ -84,6 +85,8 @@ blank_name = mkSystemName (mkVarOccUnique $ mkFastString "") (mkVarOcc "")
 blank_type = mkTyVarTy blank_id
 blank_id = mkLocalVar VanillaId blank_name blank_type vanillaIdInfo
 
+get_mg_type :: MatchGroup GhcTc (LHsExpr GhcTc) -> Type
+get_mg_type mg = uncurry mkFunTys $ (mg_arg_tys &&& mg_res_ty) $ mg_ext mg -- questioning why they didn't just give us a FunTy...
 
 inst_subty :: Type -> Type -> Maybe (Map Id Type)
 inst_subty a b =
