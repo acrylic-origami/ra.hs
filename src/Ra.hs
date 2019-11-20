@@ -1,15 +1,12 @@
 {-# LANGUAGE Rank2Types, NamedFieldPuns, LambdaCase, TupleSections, MultiWayIf, DeriveDataTypeable #-}
 module Ra (
   pat_match,
-  reduce_deep,
-  reduce
+  reduce_deep
 ) where
 
 import GHC
 import HsExtension ( XOverLit(..) )
-import Type ( mkFunTys, mkAppTy, mkAppTys, splitFunTys, getTyVar_maybe, dropForAlls )
 import DataCon ( dataConName, dataConRepType )
-import TyCon ( tyConName )
 import ConLike ( ConLike (..) )
 import Name ( mkSystemName, nameOccName )
 import OccName ( mkVarOcc, occNameString )
@@ -230,78 +227,6 @@ pat_match binds =
     pms_syms = next_table 
   } -- DEBUG
 
-reduce :: ReduceSyms -> [ReduceSyms]
-reduce syms0 =
-  let expand_reads :: Writes -> SymApp -> ReduceSyms
-      expand_reads ws sa =
-        let m_next_args :: [ReduceSyms]
-            m_next_args = map (mconcat . map (\sa' ->
-                lift_rs_syms2 list_alt (expand_reads ws sa') (mempty { rs_syms = [sa'] })
-              )) (sa_args sa)
-            next_argd_sym = mempty { rs_syms = [sa {
-               sa_args = map rs_syms m_next_args
-             }] }
-            expanded = case sa_sym sa of
-              Sym (L _ (HsVar _ (L _ v))) -> case varString v of
-                "newEmptyMVar" ->
-                  mconcat 
-                  $ map (expand_reads ws)
-                  $ concatMap snd
-                  $ filter (
-                      uncurry (&&)
-                      . (
-                          elem (getSymLoc $ sa_sym sa) . map (getSymLoc . sa_sym)
-                          &&& (elem (sa_loc sa)) . map sa_loc
-                        ) . fst
-                    ) ws -- by only taking `w_sym`, encode the law that write threads are not generally the threads that read (obvious saying it out loud, but it does _look_ like we're losing information here)
-                "readMVar" | arg0_rs:rest_rs <- m_next_args -> (\rs -> rs {
-                  rs_syms = map (\sa -> sa {
-                      sa_args = sa_args sa <> map rs_syms rest_rs
-                    }) (rs_syms rs)
-                }) arg0_rs <> (mconcat $ rest_rs) { rs_syms = mempty } -- list of pipes from the first arg
-                _ -> mempty
-              _ -> mempty
-        in (((mconcat m_next_args) { rs_syms = mempty })<>) 
-          $ mconcat $ map reduce_deep 
-          $ rs_syms $ lift_rs_syms2 list_alt expanded next_argd_sym -- a bunch of null handling that looks like a mess because it is
-        -- STACK good: relies on the pipe stack being correct
-          
-      
-      iterant :: ReduceSyms -> ReduceSyms
-      iterant rs =
-        let
-            writes = catMaybes $ map (\sa -> case sa_sym sa of
-                Sym (L _ (HsVar _ (L _ v))) | varString v == "putMVar"
-                                      , (pipes:vals:_) <- sa_args sa
-                                      -> Just (pipes, vals)
-                _ -> Nothing) (rs_stmts rs)
-            update_stack sa =
-              let (next_pms', next_stack) = (mconcat *** SB) $ unzip $ map (\case
-                      af@(AppFrame { af_syms }) ->
-                        let (next_rs', next_binds) = (first mconcat) $ unzip $ map ((snd &&& second rs_syms) . second (mconcat . map (expand_reads writes))) (stbl_binds af_syms)
-                            next_pms'' = pat_match next_binds
-                        in (next_pms'' {
-                            pms_stmts = pms_stmts next_pms'' <> rs_stmts next_rs'
-                          }, af {
-                            af_syms = pms_syms next_pms''
-                          })
-                      v -> (mempty, v)
-                    ) (unSB $ sa_stack sa)
-                  (next_args_pms, next_args) = unzip $ map (unzip . map update_stack) (sa_args sa)
-              in (next_pms' <> (mconcat $ mconcat next_args_pms), sa {
-                sa_stack = next_stack,
-                sa_args = next_args
-              })
-              
-            (next_pms, next_rs) = (mconcat *** mconcat) $ unzip $ map (second (expand_reads writes) . update_stack) $ rs_syms rs
-            next_stmts = (rs_stmts next_rs) <> (pms_stmts next_pms)
-        in next_rs {
-            rs_stmts = next_stmts
-          }
-        
-  in head $ filter (null . rs_stmts . head) $ iterate (\l -> (iterant $ head l) : l) [syms0]
-  -- takeWhile (not . null . rs_writes) $ foldl (\l _ -> l ++ [iterant $ head l]) [syms0] [0..] -- interesting that this doesn't seem to be possible
-
 -- app_types :: Type -> Type -> Type
 -- app_types l r = uncurry mkFunTys $ first (update_head (const r)) $ splitFunTys l
 
@@ -397,48 +322,69 @@ reduce_deep sa@(SA consumers locstack stack m_sym args thread) =
                     -- NOTE sa_loc isn't changed
                   }
                 ) left_syms
-             | otherwise -> case varString v of
+             | otherwise ->
               ------------------------------------
               -- +++ SPECIAL CASE FUNCTIONS +++ --
               ------------------------------------
               
-              -- "newEmptyMVar" -> -- return as terminal and identify above
-              -- "newMVar" -> -- find this in post-processing and do it
-              -- "takeMVar" -> if length args >= 1 -- no need, do this in post-processing
-              --   then 
-              --   else terminal
-              
-              -- MAGIC MONADS (fallthrough)
-              "return" | vs:args'' <- args' ->
-                mconcat $ map (\sa' -> reduce_deep $ sa' { sa_args = ((sa_args sa') <> args'') }) vs
-              -- NB about `[]` on the rightmost side of the pattern match on `args'`: it's never typesafe to apply to a monad (except `Arrow`), so if we see arguments, we have to freak out and not move forward with that.
+              -------------------------------------
+              -- +++ IO-like monad behaviors +++ --
+              -------------------------------------
+              if | varString v `elem` [
+                    "return",
+                    "returnSTM",
+                    "unSTM",
+                    "unsafeIOToSTM",
+                    "atomically",
+                    "stToIO",
+                    
+                    -- thanks to transparency of these refs, reads are equivalent to just returning a plain value
+                    "readIORef",
+                    "readMVar",
+                    "takeMVar",
+                    "readTVar",
+                    "readTVarIO",
+                    "readSTRef"
+                  ]
+                 , vs:args'' <- args'
+                 -> mconcat $ map (\sa' -> reduce_deep $ sa' { sa_args = ((sa_args sa') <> args'') }) vs
+                 
+                 | varString v `elem` [
+                    ">>",
+                    "thenSTM"
+                  ]
+                 , i:o:[] <- args'
+                 , let i' = map reduce_deep i
+                       o' = map reduce_deep o
+                 -> mconcat [i'' { rs_syms = mempty } <> o'' | i'' <- i', o'' <- o'] -- combinatorial EXPLOSION! BOOM PEW PEW -- magical monad `*>` == `>>`: take right-hand syms, merge writes
+                    
+                 | varString v `elem` [
+                    ">>=",
+                    "bindSTM"
+                  ]
+                 , i:o:[] <- args'
+                 -> mconcat $ map (\fun -> reduce_deep fun {
+                      sa_args = sa_args fun ++ [i]
+                    }
+                  ) o
+                  -- magical monad `>>=`: shove the return value from the last stage into the next, merge writes
+                  -- grabbing the writes is as easy as just adding `i` to the arguments; the argument resolution in `terminal` will take care of it
+                  -- under the assumption that it's valid to assume IO is a pure wrapper, this actually just reduces to plain application of a lambda
                 
-              ">>" | i:o:[] <- args'
-                   , let i' = map reduce_deep i
-                         o' = map reduce_deep o -> -- magical monad `*>` == `>>`: take right-hand syms, merge writes
-                    mconcat [i'' { rs_syms = mempty } <> o'' | i'' <- i', o'' <- o'] -- combinatorial EXPLOSION! BOOM PEW PEW
-              ">>=" | i:o:[] <- args' -> -- magical monad `>>=`: shove the return value from the last stage into the next, merge writes
-                    -- grabbing the writes is as easy as just adding `i` to the arguments; the argument resolution in `terminal` will take care of it
-                    -- under the assumption that it's valid to assume IO is a pure wrapper, this actually just reduces to plain application of a lambda
-                      mconcat $ map (\fun -> reduce_deep fun {
-                            sa_args = sa_args fun ++ [i]
-                          }
-                        ) o
-                
-              "forkIO" | to_fork:[] <- args' ->
+                 | varString v == "forkIO"
+                 , to_fork:[] <- args'
+                 ->
                   let result = mconcat $ map (everywhereBut (False `mkQ` (const True :: Stack -> Bool)) (mkT $ \sa' -> sa' { sa_thread = Just sa }) . reduce_deep) to_fork
                   in result {
                       rs_syms = [error "Using the ThreadID from forkIO is not yet supported."]
                     }
                     
-              -- "putMVar" -> if length args' >= 2
-              --   then
-              --     let (pipes:vals:_) = args'
-              --         next_writes = [(pipes, vals)]
-              --     in append_rs_stmts next_writes terminal'
-              --   else terminal'
+                 | varString v `elem` [
+                    "retry",
+                    "throwSTM"
+                  ] -> mempty
                 
-              _ -> terminal'
+                 | otherwise -> terminal'
         
       HsApp _ _ _ -> -- this should only come up from the GHC AST, not from our own reduce-unwrap-wrap
         let (fun, next_args) = deapp sym
