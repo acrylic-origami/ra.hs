@@ -336,15 +336,7 @@ reduce_deep sa@(SA consumers locstack stack m_sym args thread) =
                     "unSTM",
                     "unsafeIOToSTM",
                     "atomically",
-                    "stToIO",
-                    
-                    -- thanks to transparency of these refs, reads are equivalent to just returning a plain value
-                    "readIORef",
-                    "readMVar",
-                    "takeMVar",
-                    "readTVar",
-                    "readTVarIO",
-                    "readSTRef"
+                    "stToIO"
                   ]
                  , vs:args'' <- args'
                  -> mconcat $ map (\sa' -> reduce_deep $ sa' { sa_args = ((sa_args sa') <> args'') }) vs
