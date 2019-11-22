@@ -201,28 +201,26 @@ pat_match binds =
             (gr, nodemap) = mkMapGraph nodes flat_binds
         in foldl max 0 $ map (length . levels) $ dff (map fst $ fst $ mkNodes nodemap nodes) gr
         
-      pred (count, t) = (count >= max_iter) || fst t
-      
-      (_, (iter, (_, pmsn))) = (binds, until
-        pred
+      (iter, (_, pmsn)) = until
+        (uncurry (||) . ((>=max_iter) *** fst))
         ((+1) *** (iterant . snd))
         (0, (False, PatMatchSyms {
             pms_stmts = rs_stmts rs0,
             pms_syms = mempty {
               stbl_binds = binds0
             }
-          })))
+          }))
       
       tie_to_table :: Data d => d -> d
       tie_to_table = mkT (\sa -> sa {
-          sa_stack = mapSB ((BindFrame next_table):) (sa_stack sa) -- TODO check if `sa` is a good choice to put in the AppFrame. Could work -- only needed for deduping
+          sa_stack = ((BindFrame next_table):) (sa_stack sa)
         })
       
       next_table = everywhereBut (False `mkQ` (const True :: Stack -> Bool)) tie_to_table (pms_syms pmsn) {
         stbl_table = if length (stbl_binds next_table) > 0
           then fromMaybe mempty (or_pat_match_many (stbl_binds next_table)) -- `or` here because scattered bindings
           else mempty
-      } -- TODO URGENT this is pretty ugly, find a better way to avoid twice the work
+      } -- TODO this is pretty ugly, find a better way to avoid twice the work
   in (snd (binds0, everywhereBut (False `mkQ` (const True :: Stack -> Bool)) tie_to_table (pmsn { pms_syms = mempty }))) {
     pms_syms = next_table 
   } -- DEBUG
@@ -283,8 +281,8 @@ reduce_deep sa@(SA consumers locstack stack m_sym args thread) =
                             stbl_table = next_arg_matches,
                             stbl_binds = next_arg_binds
                           } <> next_explicit_binds)
-                        next_stack = mapSB (next_frame:) stack
-                        next_loc = mapSB (next_frame:) locstack
+                        next_stack = (next_frame:) stack
+                        next_loc = (next_frame:) locstack
                         next_args = drop (matchGroupArity mg) args
                     in mempty {
                       rs_stmts = pms_stmts bind_pms
@@ -306,22 +304,20 @@ reduce_deep sa@(SA consumers locstack stack m_sym args thread) =
                      -- TODO refactor with lenses
                   | otherwise = args
             terminal' = mempty { rs_syms = [sa { sa_args = args' }] }
-        in (\rs@(ReduceSyms { rs_syms }) -> -- enforce nesting rule: all invokations on consumed values are consumed
-            rs {
-                rs_syms = map (\sa' -> sa' { sa_consumers = sa_consumers sa' ++ consumers }) rs_syms -- TODO <- starting to question if this is doubling work
-              }
-          ) $
+        in
           if | varString v == "debug#" ->
                 -- DEBUG SYMBOL
                 mempty
-             | Just left_syms <- snd (sa, stack_var_lookup v stack) -> -- DEBUG -- TODO look out for shadowed declarations of other types that don't match (e.g. might have same arity but subtly incompatible types somehow)
-              mconcat $ map (\sa' ->
-                  reduce_deep sa' { -- TODO: check if `reduce_deep` is actually necessary here; might not be because we expect the symbols in the stack to be resolved
-                    sa_args = sa_args sa' <> args', -- ARGS good: elements in the stack are already processed, so if their args are okay these ones are okay
-                    sa_stack = mapSB (<>(unSB stack)) (sa_stack sa')
-                    -- NOTE sa_loc isn't changed
-                  }
-                ) left_syms
+             | Just left_syms <- stack_var_lookup v stack ->
+              mempty {
+                rs_syms = map (\sa' ->
+                    sa' {
+                      sa_args = sa_args sa' <> args', -- ARGS good: elements in the stack are already processed, so if their args are okay these ones are okay
+                      sa_stack = (<>stack) (sa_stack sa')
+                      -- NOTE sa_loc isn't changed
+                    }
+                  ) left_syms
+              }
              | otherwise ->
               ------------------------------------
               -- +++ SPECIAL CASE FUNCTIONS +++ --
@@ -420,8 +416,8 @@ reduce_deep sa@(SA consumers locstack stack m_sym args thread) =
           <> (mconcat $ map (\next_expr ->
               reduce_deep sa {
                 sa_sym = Sym next_expr,
-                sa_stack = mapSB (next_frame:) stack,
-                sa_loc = mapSB (next_frame:) locstack
+                sa_stack = (next_frame:) stack,
+                sa_loc = (next_frame:) locstack
               }) next_exprs) -- TODO check that record update with sym (and its location) is the right move here
         
       HsLet _ _ expr -> unravel1 expr [] -- assume local bindings already caught by surrounding function body (HsLam case)
@@ -430,7 +426,7 @@ reduce_deep sa@(SA consumers locstack stack m_sym args thread) =
               m_next_expr = case stmt of
                 LastStmt _ expr _ _ -> Just expr -- kill the results from all previous stmts because of the semantics of `>>`
                 -- ApplicativeStmt _ _ _ -> undefined -- TODO yet to appear in the wild and be implemented
-                BindStmt _ _pat expr _ _ty -> Just expr -- covered by binds; can't be the last statement anyways -- <- scratch that -- TODO implement this to unbox the monad (requires fake IO structure2) -- <- scratch THAT, we're not going to do anything because the binds are covered in grhs_binds; we're letting IO and other magic monads be unravelled into their values contained within to simplify analysis
+                BindStmt _ _pat expr _ _ty -> Just expr -- covered by binds; can't be the last statement anyways -- <- scratch that, implement this to unbox the monad (requires fake IO structure2) -- <- scratch THAT, we're not going to do anything because the binds are covered in grhs_binds; we're letting IO and other magic monads be unravelled into their values contained within to simplify analysis
                 LetStmt _ _ -> Nothing -- same story as BindStmt
                 BodyStmt _ expr _ _ -> Just expr
                 ParStmt _ _ _ _ -> Nothing -- not analyzed for now, because the list comp is too niche (only used for parallel monad comprehensions; see <https://gitlab.haskell.org/ghc/ghc/wikis/monad-comprehensions>)

@@ -38,7 +38,6 @@ mk_write sa | Sym (L _ (HsVar _ (L _ v))) <- sa_sym sa =
                   ]
                  , vals:_ <- sa_args sa
                  -> Just ([sa], vals) -- the "new__" expression itself is the pipe
-                 -- TODO URGENT this may cause an infinite loop as is
                  
                  | varString v == "atomicModifyIORefLazy_" -- "atomicModifyIORef2Lazy" is todo: needs pattern matching
                  , pipes:fns:rest <- sa_args sa
@@ -58,14 +57,14 @@ mk_write sa | Sym (L _ (HsVar _ (L _ v))) <- sa_sym sa =
 
 
 refresh_app_frames :: Stack -> (PatMatchSyms, Stack)
-refresh_app_frames st = (mconcat *** SB) $ unzip $ map (\frame -> case frame of
+refresh_app_frames st = first mconcat $ unzip $ map (\frame -> case frame of
     AppFrame {} ->
       let next_pms = pat_match $ stbl_binds $ af_syms frame
       in (next_pms, frame {
         af_syms = pms_syms next_pms
       })
     _ -> (mempty, frame)
-  ) (unSB st)
+  ) st
 
 unref :: Writes -> SymApp -> [SymApp]
 unref ws sa =
@@ -79,7 +78,7 @@ unref ws sa =
           ) ws -- by only taking `w_sym`, encode the law that write threads are not generally the threads that read (obvious saying it out loud, but it does _look_ like we're losing information here)
   in map (\sa' -> sa' {
       sa_args = sa_args sa' <> sa_args sa,
-      sa_stack = mapSB (<>(unSB $ sa_stack sa)) (sa_stack sa') -- NOTE another instance of substitution law: merge stacks
+      sa_stack = (<>(sa_stack sa)) (sa_stack sa') -- NOTE another instance of substitution law: merge stacks
     }) bases
 
 
@@ -120,7 +119,7 @@ reduce syms0 =
     $ filter ((\(last_writes, next_rs) ->
         let next_writes_map = map (both sa_loc) $ permute2 $ catMaybes $ map mk_write $ rs_stmts next_rs
             last_writes_map = map (both sa_loc) $ permute2 last_writes
-        in all (`elem` last_writes_map) next_writes_map
+        in all ((`any` last_writes_map) . ((uncurry (&&)).) . uncurry (***) . both stack_eq) next_writes_map
       ) . head)
     $ iterate (\l -> (iterant $ rs_stmts $ snd $ head l):l) [(mempty, syms0)] -- NOTE ulterior necessity of logging statements: expansions of writes are progressive, so we may blitz through tagging all the writes, but reads could unravel one layer at a time
   -- takeWhile (not . null . rs_writes) $ foldl (\l _ -> l ++ [iterant $ head l]) [syms0] [0..] -- interesting that this doesn't seem to be possible

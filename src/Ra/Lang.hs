@@ -7,8 +7,7 @@ module Ra.Lang (
   StackKey,
   -- ThreadKey(..),
   StackFrame(..),
-  unSB,
-  mapSB,
+  stack_eq,
   stack_var_lookup,
   table_lookup,
   make_loc_key,
@@ -153,7 +152,7 @@ data SymApp = SA {
   sa_thread :: Maybe SymApp -- TODO consider a more elegant type
 } deriving (Data, Typeable) -- 2D tree. Too bad we can't use Tree; the semantics are totally different
 
-sa_from_sym s = SA mempty (SB mempty) (SB mempty) s mempty Nothing
+sa_from_sym s = SA mempty mempty mempty s mempty Nothing
 
 get_sa_type :: SymApp -> Type -- FYI this is the type _after_ reduction; i.e. apps and sections go down an arity, OpApps go down two. The law: this preserves types of all terminal symbols (see HsLam[Case], HsVar, Hs[Over]Lit, ExplicitTuple, ExplicitList)
 get_sa_type sa =
@@ -202,7 +201,6 @@ get_sa_type sa =
 sub_sa_types_T :: SymApp -> GenericT
 sub_sa_types_T sa =
   let sa_ty = get_sa_type sa
-      -- TODO URGENT rip through all "wrappers" (foralls and contexts) to get to the true return type, assuming a saturated application... which is wrong for unsaturated cases. Instead, it really should be an argument-by-argument decomp, which suggests we should write a function that deapps in type space
       sa_fun_ret_ty = dig_ret_ty sa_ty where
         dig_ret_ty ty =
           let (arg_tys, rhs) = splitFunTys $ dropForAlls ty
@@ -211,11 +209,7 @@ sub_sa_types_T sa =
             else dig_ret_ty rhs
       type_map = fromMaybe mempty $ inst_subty sa_ty (mkFunTys (map (reduce_types . head) (sa_args sa)) sa_fun_ret_ty) -- beta-reduce all types in the left-hand sides
       tx :: GenericT
-      tx = mkT (
-          (\x ->
-              fromMaybe x (join $ fmap (type_map!?) $ getTyVar_maybe x)
-            ) -- DEBUG
-        )
+      tx = mkT (uncurry fromMaybe . (id &&& join . fmap (type_map!?) . getTyVar_maybe))
   in snd (sa, tx `extT` ((\expr -> case expr of -- DEBUG
       L vloc (HsVar x (L loc v)) -> L vloc (HsVar x (L loc (setVarType v (everywhere tx $ varType v)))) -- DEBUG
       _ -> expr
@@ -280,31 +274,24 @@ data StackFrame = EmptyFrame | AppFrame {
 
 -- BOOKMARK: Stack needs to be oufitted with the graph of bindings that refer to each other, in case a hold resolves and a new pattern match works.
 
-newtype Stack = SB [StackFrame] deriving (Data, Typeable) -- TODO flatten this to type alias -- nodes: consecutive ones are child-parent
-unSB (SB v) = v
-mapSB f = SB . f . unSB
-  
+type Stack = [StackFrame] -- TODO flatten this to type alias -- nodes: consecutive ones are child-parent
+
 -- instance Ord Stack where
 --   (<=) = (curry $ uncurry (<=) . both (map fst . unSB))
 
-instance Eq Stack where
-  (==) = curry $ uncurry (&&) . (
-      uncurry (==) . both length
-      &&& all (uncurry (==) . both (getSymLoc . sa_sym . af_raw)) . uncurry zip
-    ) . both stack_apps -- where
-    -- pred (AppFrame { af_raw = l }) (AppFrame { af_raw = r }) = (getSymLoc $ sa_sym l) == ( r) -- don't push the equality recursion any further
-    -- pred (VarRefFrame l) (VarRefFrame r) = l == r
-    -- pred (BindFrame {}) (BindFrame {}) = True -- TODO dubious
-    -- pred _ _ = False
+stack_eq = curry $ uncurry (&&) . (
+    uncurry (==) . both length
+    &&& all (uncurry (==) . both (getSymLoc . sa_sym . af_raw)) . uncurry zip
+  ) . both stack_apps
 
 is_parent = undefined
--- is_parent p q = SB (take (length (unSB q)) (unSB p)) == q
+-- is_parent p q = SB (take (length q) p) == q
 
 is_visited :: Stack -> SymApp -> Bool
 is_visited sb sa = any (\case
     AppFrame { af_raw } -> (sa_sym af_raw) == (sa_sym sa)
     _ -> False
-  ) (unSB sb)
+  ) sb
 
 
 -- instance Semigroup Stack where
@@ -314,7 +301,7 @@ is_visited sb sa = any (\case
 --           }) -- prefer first (accumulating) stack
 --         combine Nothing (Just b) = b
 --         combine (Just a) Nothing = a
---     in curry $ SB . map (uncurry combine) . uncurry zipAll . both unSB
+--     in curry $ SB . map (uncurry combine) . uncurry zipAll
 
 -- instance Monoid Stack where
 --   mempty = SB mempty
@@ -367,7 +354,7 @@ is_zeroth_kind _ = False
 -- make_thread_key stack = undefined 
 {- TKNormal $
   if not $ null $ st_thread stack
-    then drop ((length $ unSB stack) - (head $ st_thread stack)) $ make_loc_key stack
+    then drop ((length stack) - (head $ st_thread stack)) $ make_loc_key stack
     else mempty -}
 
 make_loc_key :: SymApp -> StackKey
@@ -376,17 +363,16 @@ make_loc_key = uncurry (:) . (
     &&& catMaybes . map (\case
         AppFrame { af_raw } -> Just $ getSymLoc $ sa_sym af_raw
         _ -> Nothing
-      ) . unSB . sa_loc -- map fst . unSB
+      ) . sa_loc -- map fst
   )
 
 stack_apps :: Stack -> [StackFrame]
-stack_apps = filter (\case { AppFrame {} -> True; _ -> False }) . unSB
+stack_apps = filter (\case { AppFrame {} -> True; _ -> False })
 
 -- stack_var_refs used for the law that var resolution cycles only apply to the tail
 -- stack_var_refs :: Stack -> [Id]
--- stack_var_refs = stack_var_refs' . unSB where
---   stack_var_refs' ((VarRefFrame v):rest) = v:(stack_var_refs' rest)
---   stack_var_refs' _ = []
+-- stack_var_refs ((VarRefFrame v):rest) = v:(stack_var_refs' rest)
+-- stack_var_refs _ = []
 
 table_lookup :: Id -> Map Id [SymApp] -> Maybe [SymApp]
 table_lookup v tbl = uncurry (<|>) $ (
@@ -406,10 +392,10 @@ stack_var_lookup v =
     AppFrame { af_syms } -> lookup af_syms
     BindFrame { bf_syms } -> lookup bf_syms
     _ -> id
-  ) Nothing . unSB
+  ) Nothing
 
 update_head_table :: SymTable -> Stack -> Stack
-update_head_table next_table st = undefined {- mapSB update_head (second (uncurry (<>) . (,next_table))) st
+update_head_table next_table st = undefined {- update_head (second (uncurry (<>) . (,next_table))) st
 } -}
 
 runIO_name :: Name
