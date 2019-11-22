@@ -199,7 +199,7 @@ pat_match binds =
             nodes = map (\(x,_,_) -> x) flat_binds
             gr :: Gr Id ()
             (gr, nodemap) = mkMapGraph nodes flat_binds
-        in foldl max 0 $ map (length . levels) $ dff (map fst $ fst $ mkNodes nodemap nodes) gr
+        in (+1) $ foldl max 0 $ map (length . levels) $ dff (map fst $ fst $ mkNodes nodemap nodes) gr
         
       (iter, (_, pmsn)) = until
         (uncurry (||) . ((>=max_iter) *** fst))
@@ -216,14 +216,27 @@ pat_match binds =
           sa_stack = ((BindFrame next_table):) (sa_stack sa)
         })
       
-      next_table = everywhereBut (False `mkQ` (const True :: Stack -> Bool)) tie_to_table (pms_syms pmsn) {
-        stbl_table = if length (stbl_binds next_table) > 0
-          then fromMaybe mempty (or_pat_match_many (stbl_binds next_table)) -- `or` here because scattered bindings
-          else mempty
-      } -- TODO this is pretty ugly, find a better way to avoid twice the work
-  in (snd (binds0, everywhereBut (False `mkQ` (const True :: Stack -> Bool)) tie_to_table (pmsn { pms_syms = mempty }))) {
+      next_map = if length (stbl_binds $ pms_syms pmsn) > 0
+        then fromMaybe mempty (or_pat_match_many (stbl_binds $ pms_syms pmsn)) -- `or` here because scattered bindings
+        else mempty
+        
+      next_table = snd $
+        ((next_map, binds), everywhereBut
+          (False `mkQ` (const True :: Stack -> Bool))
+          (tie_to_table
+            `extT` filter (\x -> isNothing $ sub next_map x))
+          (pms_syms pmsn) {
+            stbl_table = if length (stbl_binds next_table) > 0
+              then fromMaybe mempty (or_pat_match_many (stbl_binds next_table)) -- `or` here because scattered bindings
+              else mempty
+          }) -- TODO this is pretty ugly, find a better way to avoid twice the work
+  in (everywhereBut
+      (False `mkQ` (const True :: Stack -> Bool))
+      tie_to_table
+      (pmsn { pms_syms = mempty })
+    ) {
     pms_syms = next_table 
-  } -- DEBUG
+  }
 
 -- app_types :: Type -> Type -> Type
 -- app_types l r = uncurry mkFunTys $ first (update_head (const r)) $ splitFunTys l

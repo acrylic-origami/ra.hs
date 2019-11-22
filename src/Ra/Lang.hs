@@ -207,7 +207,7 @@ sub_sa_types_T sa =
           in if null $ arg_tys
             then rhs -- drop forall
             else dig_ret_ty rhs
-      type_map = fromMaybe mempty $ inst_subty sa_ty (mkFunTys (map (reduce_types . head) (sa_args sa)) sa_fun_ret_ty) -- beta-reduce all types in the left-hand sides
+      type_map = fromMaybe mempty $ inst_subty sa_ty (mkFunTys (map (fromMaybe blank_type . fmap reduce_types . listToMaybe) (sa_args sa)) sa_fun_ret_ty) -- beta-reduce all types in the left-hand sides -- account for possibly missing arguments (due to anti-cycle)
       tx :: GenericT
       tx = mkT (uncurry fromMaybe . (id &&& join . fmap (type_map!?) . getTyVar_maybe))
   in snd (sa, tx `extT` ((\expr -> case expr of -- DEBUG
