@@ -317,7 +317,11 @@ reduce_deep sa@(SA consumers locstack stack m_sym args thread) =
                      -- TODO refactor with lenses
                   | otherwise = args
             terminal' = mempty { rs_syms = [sa { sa_args = args' }] }
-        in
+        in (\rs@(ReduceSyms { rs_syms }) -> -- enforce nesting rule: all invokations on consumed values are consumed
+            rs {
+                rs_syms = map (\sa' -> sa' { sa_consumers = sa_consumers sa' ++ consumers }) rs_syms -- TODO <- starting to question if this is doubling work
+              }
+          ) $
           if | varString v == "debug#" ->
                 -- DEBUG SYMBOL
                 mempty
