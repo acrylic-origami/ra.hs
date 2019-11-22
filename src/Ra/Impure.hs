@@ -78,7 +78,7 @@ unref ws sa =
           ) ws -- by only taking `w_sym`, encode the law that write threads are not generally the threads that read (obvious saying it out loud, but it does _look_ like we're losing information here)
   in map (\sa' -> sa' {
       sa_args = sa_args sa' <> sa_args sa,
-      sa_stack = (<>(sa_stack sa)) (sa_stack sa') -- NOTE another instance of substitution law: merge stacks
+      sa_stack = sa_stack sa' <> sa_stack sa -- NOTE another instance of substitution law: merge stacks
     }) bases
 
 

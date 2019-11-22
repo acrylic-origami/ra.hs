@@ -26,7 +26,7 @@ import Data.Function ( (&) )
 import Data.Maybe ( catMaybes, fromMaybe, maybeToList, isNothing )
 import Data.Data ( toConstr, Data(..), Typeable(..) )
 import Data.Generics ( everywhere, everywhereBut, GenericT(), everything, everythingBut, GenericQ(), mkQ, mkT, extQ, extT )
-import Data.Generics.Extra ( constr_ppr, everywhereWithContextBut, extQT, mkQT )
+import Data.Generics.Extra ( constr_ppr, everywhereWithContextLazyBut, everywhereWithContextBut, extQT, mkQT )
 import Data.Semigroup ( (<>) )
 import Data.Monoid ( mempty, mconcat )
 import Control.Monad ( join, guard, foldM )
@@ -118,9 +118,6 @@ pat_match_one pat sa =
       
     _ -> error $ constr_ppr pat
 
-newtype Q a b = Q (Maybe (a, b)) deriving (Data, Typeable)
-unQ (Q z) = z
-
 or_pat_match_many :: [Bind] -> Maybe (Map Id [SymApp])
 or_pat_match_many = pat_match_many (\a b -> liftA2 (unionWith (++)) a b <|> a <|> b) -- could've been `<>` if that was `unionWith (++)` for these maps, but instead `union` destroys the rhs in collisions
 
@@ -132,47 +129,50 @@ pat_match_many f = foldr1 f . map mapper
   where mapper (pat, exprs@(_:_)) = foldr1 f $ map (pat_match_one pat) exprs
         mapper _ = Nothing -- TODO being a little sloppy here, assuming that `Nothing` is an acceptable result for a default. In fact, note that if `f` was `const (const (Just mempty))` this would still return `Nothing` if there are single matches. Then there's a sharp phase change with 2 elems when they all pass. 
 
+sub :: Map Id [SymApp] -> SymApp -> Maybe ReduceSyms
+sub t sa = -- assumes incoming term is a normal form
+  let subbed_sa = sub_sa_types_wo_stack sa sa -- really hope this works
+  in case sa_sym subbed_sa of
+    Sym (L loc (HsVar _ (L _ v))) -> (
+          mconcat
+          -- . map (\rs' ->
+          --     let rss' = map (sub t) (rs_syms rs')
+          --     in map (uncurry (id )) (zip rss' (rs_syms rs')))
+          . map (\sa' ->
+              reduce_deep sa' {
+                  sa_args = (sa_args sa') <> (sa_args subbed_sa)
+                }
+            )
+        )
+      <$> (snd $ (sa, table_lookup v t)) -- DEBUG
+    _ -> Nothing
+
 pat_match :: [Bind] -> PatMatchSyms
 pat_match binds = 
-  let sub :: Map Id [SymApp] -> SymApp -> Maybe ReduceSyms
-      sub t sa = -- assumes incoming term is a normal form
-        let subbed_sa = sub_sa_types_wo_stack sa sa -- really hope this works
-        in case sa_sym subbed_sa of
-          Sym (L loc (HsVar _ (L _ v))) -> (
-                mconcat
-                -- . map (\rs' ->
-                --     let rss' = map (sub t) (rs_syms rs')
-                --     in map (uncurry (id )) (zip rss' (rs_syms rs')))
-                . map (\sa' ->
-                    reduce_deep sa' {
-                        sa_args = (sa_args sa') <> (sa_args subbed_sa)
-                      }
-                  )
-              )
-            <$> (snd $ (sa, table_lookup v t)) -- DEBUG
-          _ -> Nothing
-      
-      iterant :: PatMatchSyms -> (Bool, PatMatchSyms)
+  let iterant :: PatMatchSyms -> (Bool, PatMatchSyms)
       iterant pms | let binds = stbl_binds $ pms_syms pms
                   , length binds > 0
                   , Just next_table <- or_pat_match_many binds
-                  = let f0 :: Data b => b -> Q (Maybe ReduceSyms) b
-                        f0 b = Q $ Just (Nothing, b)
+                  = let f0 :: Data b => b -> (Maybe ReduceSyms, b)
+                        f0 b = (Nothing, b)
                         (m_next_rs, next_pms) =
-                          everywhereWithContextBut (<>) (unQ . (
-                              f0 `mkQT` (Q . Just . 
-                                  (mconcat *** concat)
-                                  . unzip . map (
-                                      (
-                                          fst
-                                          &&& uncurry (flip fromMaybe) . (fmap rs_syms *** pure)
-                                        )
-                                      . (sub next_table &&& id)
-                                    )
-                                )
-                                `extQT` (const (Q Nothing) :: Stack -> Q (Maybe ReduceSyms) Stack)
-                            )
-                          ) mempty pms
+                          everywhereWithContextLazyBut
+                            (<>)
+                            (False `mkQ` (const True :: Stack -> Bool))
+                            (
+                                f0 `mkQT` (
+                                    (mconcat *** concat)
+                                    . unzip . map (
+                                        (
+                                            fst
+                                            &&& uncurry (flip fromMaybe) . (fmap rs_syms *** pure)
+                                          )
+                                        . (sub next_table &&& id)
+                                      )
+                                  )
+                              )
+                            mempty
+                            pms
                     in (
                         isNothing m_next_rs,
                         -- INVARIANT below is identical to pms if m_next_rs is empty. Difficult to prove because of generic transformation.
@@ -322,15 +322,13 @@ reduce_deep sa@(SA consumers locstack stack m_sym args thread) =
                 -- DEBUG SYMBOL
                 mempty
              | Just left_syms <- stack_var_lookup v stack ->
-              mempty {
-                rs_syms = map (\sa' ->
-                    sa' {
-                      sa_args = sa_args sa' <> args', -- ARGS good: elements in the stack are already processed, so if their args are okay these ones are okay
-                      sa_stack = (<>stack) (sa_stack sa')
-                      -- NOTE sa_loc isn't changed
-                    }
-                  ) left_syms
-              }
+              mconcat $ map (\sa' ->
+                  reduce_deep sa' { -- TODO: check if `reduce_deep` is actually necessary here; might not be because we expect the symbols in the stack to be resolved
+                    sa_args = sa_args sa' <> args', -- ARGS good: elements in the stack are already processed, so if their args are okay these ones are okay
+                    sa_stack = (sa_stack sa') <> stack
+                    -- NOTE sa_loc isn't changed
+                  }
+                ) left_syms
              | otherwise ->
               ------------------------------------
               -- +++ SPECIAL CASE FUNCTIONS +++ --
