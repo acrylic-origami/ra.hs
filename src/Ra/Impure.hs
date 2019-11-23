@@ -7,7 +7,7 @@ module Ra.Impure (
 
 import GHC
 
-import Data.Maybe ( catMaybes )
+import Data.Maybe ( catMaybes, fromMaybe )
 import Data.Generics ( Data, Typeable )
 import Data.Generics.Extra ( everywhereWithContextBut, mkQT, extQT )
 import Control.Arrow ( (&&&), (***), first, second )
@@ -68,14 +68,24 @@ refresh_app_frames st = first mconcat $ unzip $ map (\frame -> case frame of
 
 unref :: Writes -> SymApp -> [SymApp]
 unref ws sa =
-  let bases = concatMap snd
-        $ filter (
-            (
-                 -- beware of unLoc and conflicts between variables
-                elem (getSymLoc $ sa_sym sa) . map (getSymLoc . sa_sym) -- TODO URGENT condition now too broad: need to account for shadowing
-                -- &&& (elem (sa_loc sa)) . map sa_loc
-              ) . fst
-          ) ws -- by only taking `w_sym`, encode the law that write threads are not generally the threads that read (obvious saying it out loud, but it does _look_ like we're losing information here)
+  let bases = snd $ foldl (\(max_len, sas) (pipes, next_sas) ->
+          let m_next_max_len = foldr (\pipe ->
+                  if is_parent (sa_loc sa) (sa_loc pipe)
+                    then Just . max (length $ stack_apps $ sa_loc pipe) . fromMaybe 0
+                    else id
+                ) Nothing pipes
+              m_ret = fmap (\sa' -> (\case -- encode shadowing rule: deepest matching stack loc wins
+                  GT -> (,sas)
+                  EQ -> (,sas <> next_sas)
+                  LT -> (,next_sas)
+                ) $ compare max_len sa')
+                (snd ((sa, pipes), m_next_max_len)) -- DEBUG
+                <*> fmap (max max_len) m_next_max_len
+          in if | elem (getSymLoc $ sa_sym sa) $ map (getSymLoc . sa_sym) pipes
+                , Just ret <- m_ret -> ret -- by only taking `w_sym`, encode the law that write threads are not generally the threads that read (obvious saying it out loud, but it does _look_ like we're losing information here)
+                | otherwise -> (max_len, sas)
+        ) (0, mempty) ws
+  
   in map (\sa' -> sa' {
       sa_args = sa_args sa' <> sa_args sa,
       sa_stack = sa_stack sa' <> sa_stack sa -- NOTE another instance of substitution law: merge stacks

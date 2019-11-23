@@ -5,7 +5,8 @@ module Ra.Lang.Extra (
   ppr_sa,
   ppr_rs,
   ppr_pms,
-  ppr_stack
+  ppr_stack,
+  ppr_table
   -- ppr_writes
 ) where
 
@@ -94,6 +95,7 @@ ppr_stack show' = foldr (\case
     AppFrame sa syms -> (++("---\n\nAF\n" ++ ppr_table show' syms))
     -- BindFrame syms -> (++("---\n\nBF\n" ++ ppr_table show' syms))
     BindFrame {} -> (++"---\n\nBF\n")
+    StmtFrame {} -> (++"---\n\nSF\n")
     
     _ -> id
   ) ""

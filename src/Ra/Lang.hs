@@ -13,6 +13,7 @@ module Ra.Lang (
   make_loc_key,
   -- make_thread_key,
   stack_apps,
+  stack_has_stmts,
   update_head_table,
   ReduceSyms(..),
   PatMatchSyms(..),
@@ -264,12 +265,16 @@ pms2rs pms = ReduceSyms {
   rs_stmts = pms_stmts pms
 }
 
-data StackFrame = EmptyFrame | AppFrame {
-  af_raw :: SymApp, -- for anti-cycle purposes
-  af_syms :: SymTable
-} | BindFrame {
-  bf_syms :: SymTable
-}
+data StackFrame =
+  EmptyFrame
+  | AppFrame {
+    af_raw :: SymApp, -- for anti-cycle purposes
+    af_syms :: SymTable
+  }
+  | BindFrame {
+    bf_syms :: SymTable
+  }
+  | StmtFrame
   deriving (Data, Typeable)
 
 -- BOOKMARK: Stack needs to be oufitted with the graph of bindings that refer to each other, in case a hold resolves and a new pattern match works.
@@ -284,8 +289,7 @@ stack_eq = curry $ uncurry (&&) . (
     &&& all (uncurry (==) . both (getSymLoc . sa_sym . af_raw)) . uncurry zip
   ) . both stack_apps
 
-is_parent = undefined
--- is_parent p q = SB (take (length q) p) == q
+is_parent = curry $ (\(p, q) -> take (length q) p `stack_eq` q) . both stack_apps
 
 is_visited :: Stack -> SymApp -> Bool
 is_visited sb sa = any (\case
@@ -368,6 +372,9 @@ make_loc_key = uncurry (:) . (
 
 stack_apps :: Stack -> [StackFrame]
 stack_apps = filter (\case { AppFrame {} -> True; _ -> False })
+
+stack_has_stmts :: Stack -> Bool
+stack_has_stmts = any (\case { StmtFrame -> True; _ -> False })
 
 -- stack_var_refs used for the law that var resolution cycles only apply to the tail
 -- stack_var_refs :: Stack -> [Id]

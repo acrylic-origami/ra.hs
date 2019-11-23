@@ -132,15 +132,29 @@ pat_match_many f = foldr1 f . map mapper
 sub :: Map Id [SymApp] -> SymApp -> Maybe ReduceSyms
 sub t sa = -- assumes incoming term is a normal form
   let subbed_sa = sub_sa_types_wo_stack sa sa -- really hope this works
+      sa_has_stmts = stack_has_stmts (sa_loc subbed_sa)
   in case sa_sym subbed_sa of
-    Sym (L loc (HsVar _ (L _ v))) -> (
+    Sym (L loc s@(HsVar _ (L _ v))) -> (
           mconcat
           -- . map (\rs' ->
           --     let rss' = map (sub t) (rs_syms rs')
           --     in map (uncurry (id )) (zip rss' (rs_syms rs')))
           . map (\sa' ->
-              reduce_deep sa' {
-                  sa_args = (sa_args sa') <> (sa_args subbed_sa)
+              let sa'' =
+                    if | sa_has_stmts
+                       , Sym (L loc s'@(HsVar _ (L _ v'))) <- sa_sym sa'
+                       , varString v' `elem` [ "newMVar", "newEmptyMVar", "newTVar", "newTVarIO", "newIORef", "newSTRef" ]
+                       -> sa' {
+                          sa_sym = Sym (L (getSymLoc $ sa_sym sa) s'),
+                          sa_loc = sa_loc subbed_sa
+                        }
+                       | sa_has_stmts
+                       -> sa' {
+                         sa_loc = StmtFrame : sa_loc sa' -- propagation of statement
+                       }
+                       | otherwise -> sa'
+              in reduce_deep sa'' {
+                  sa_args = (sa_args sa'') <> (sa_args subbed_sa)
                 }
             )
         )
@@ -317,6 +331,7 @@ reduce_deep sa@(SA consumers locstack stack m_sym args thread) =
                      -- TODO refactor with lenses
                   | otherwise = args
             terminal' = mempty { rs_syms = [sa { sa_args = args' }] }
+              
         in (\rs@(ReduceSyms { rs_syms }) -> -- enforce nesting rule: all invokations on consumed values are consumed
             rs {
                 rs_syms = map (\sa' -> sa' { sa_consumers = sa_consumers sa' ++ consumers }) rs_syms -- TODO <- starting to question if this is doubling work
@@ -357,19 +372,28 @@ reduce_deep sa@(SA consumers locstack stack m_sym args thread) =
                     "thenSTM"
                   ]
                  , i:o:[] <- args'
-                 , let i' = map reduce_deep i
-                       o' = map reduce_deep o
-                 -> mconcat [i'' { rs_syms = mempty } <> o'' | i'' <- i', o'' <- o'] -- combinatorial EXPLOSION! BOOM PEW PEW -- magical monad `*>` == `>>`: take right-hand syms, merge writes
+                 , let reduce' = map ((\rs -> rs { rs_syms = map (\sa' -> sa' { sa_loc = StmtFrame : sa_loc sa }) (rs_syms rs) }) . reduce_deep)
+                       i' = reduce' i -- no need to reloc pipes: we dump the syms anyways
+                       o' = reduce' o
+                       next_rs = mconcat [i'' { rs_syms = mempty } <> o'' | i'' <- i', o'' <- o']-- combinatorial EXPLOSION! BOOM PEW PEW -- magical monad `*>` == `>>`: take right-hand syms, merge writes
+                 -> next_rs {
+                     rs_stmts = rs_stmts next_rs <> rs_syms next_rs <> rs_syms (mconcat i')
+                  }
                     
                  | varString v `elem` [
                     ">>=",
                     "bindSTM"
                   ]
                  , i:o:[] <- args'
-                 -> mconcat $ map (\fun -> reduce_deep fun {
-                      sa_args = sa_args fun ++ [i]
-                    }
-                  ) o
+                 ->
+                  let next_rs = mconcat $ map (\fun -> reduce_deep fun {
+                          sa_args = sa_args fun ++ [i]
+                        }) o
+                      next_syms = map (\sa -> sa { sa_loc = StmtFrame : sa_loc sa }) (rs_syms next_rs)
+                  in next_rs {
+                    rs_syms = next_syms,
+                    rs_stmts = rs_stmts next_rs <> next_syms <> i -- TODO including both inputs and outputs in the worst-case will duplicate most statements (e.g. if it's a long chain of `>>` and `>>=`), which ends up polluting the top-level, maybe with an exponential number of terms. However, the base case is non-trivial because if it's just this statement alone, we would need to log both as statements for proper coverage.
+                  }
                   -- magical monad `>>=`: shove the return value from the last stage into the next, merge writes
                   -- grabbing the writes is as easy as just adding `i` to the arguments; the argument resolution in `terminal` will take care of it
                   -- under the assumption that it's valid to assume IO is a pure wrapper, this actually just reduces to plain application of a lambda
@@ -441,13 +465,13 @@ reduce_deep sa@(SA consumers locstack stack m_sym args thread) =
               m_next_expr = case stmt of
                 LastStmt _ expr _ _ -> Just expr -- kill the results from all previous stmts because of the semantics of `>>`
                 -- ApplicativeStmt _ _ _ -> undefined -- TODO yet to appear in the wild and be implemented
-                BindStmt _ _pat expr _ _ty -> Just expr -- covered by binds; can't be the last statement anyways -- <- scratch that, implement this to unbox the monad (requires fake IO structure2) -- <- scratch THAT, we're not going to do anything because the binds are covered in grhs_binds; we're letting IO and other magic monads be unravelled into their values contained within to simplify analysis
-                LetStmt _ _ -> Nothing -- same story as BindStmt
+                BindStmt _ _pat expr _ _ty -> Just expr
+                LetStmt _ _ -> Nothing
                 BodyStmt _ expr _ _ -> Just expr
                 ParStmt _ _ _ _ -> Nothing -- not analyzed for now, because the list comp is too niche (only used for parallel monad comprehensions; see <https://gitlab.haskell.org/ghc/ghc/wikis/monad-comprehensions>)
                 _ -> fail
                 -- fun fact: I thought ParStmt was for "parenthesized", but it's "parallel"
-              m_next_syms = flip unravel1 [] <$> m_next_expr
+              m_next_syms = ((\rs -> rs { rs_syms = map (\sa' -> sa' { sa_loc = StmtFrame : sa_loc sa' }) (rs_syms rs) }) . flip unravel1 []) <$> m_next_expr
           in syms { -- combining rule assumes LastStmt is really the last statement every time
             rs_syms = fromMaybe mempty (rs_syms <$> m_next_syms),
             rs_stmts = rs_stmts syms <> fromMaybe mempty ((rs_stmts <$> m_next_syms) <> (rs_syms <$> m_next_syms))
