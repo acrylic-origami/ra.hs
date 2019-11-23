@@ -7,7 +7,7 @@ module Ra.GHC.Translate (
 import GHC
 import Bag ( bagToList, mapBag )
 
-import Data.Generics ( GenericQ, mkQ, extQ, everythingBut)
+import Data.Generics ( GenericQ, mkQ, extQ, gmapQ, everythingBut)
 import Data.Generics.Extra ( shallowest, constr_ppr )
 import Control.Arrow ( (&&&) )
 
@@ -41,19 +41,29 @@ bind_to_table (L loc b) = case b of
 -- uncurried: Data c => ((forall d. Data d => d -> e), c) -> [e]
 
 grhs_binds :: GenericQ [Bind] -- TODO consider passing more info via `GenericQ (Maybe PatMatchSyms)`, and removing the fromMaybe
-grhs_binds = everythingBut (<>) (
-    (mempty, False)
-    `mkQ` ((,True) . bind_to_table)
-    `extQ` ((,False) . ((\case
-        BindStmt _ pat expr _ _ -> [(pat, [sa_from_sym (Sym expr)])] -- TODO check if a fresh stack key here is the right thing to do
-        _ -> mempty
-      ) . unLoc :: LStmt GhcTc (LHsExpr GhcTc) -> [Bind])) -- TODO dangerous: should we really keep looking deeper after finding a BindStmt?
-    `extQ` ((mempty,) . ((\case 
-      HsApp _ _ _ -> True
-      HsLam _ _ -> True
-      _ -> False 
-    ) :: HsExpr GhcTc -> Bool)) -- guard against applications and lambdas, which introduce bindings we need to dig into a scope to bind
-  )
+grhs_binds = go False where
+  go :: Bool -> GenericQ [Bind]
+  go is_do a =
+    (
+        concat (gmapQ (go is_do) a)
+        `mkQ` bind_to_table
+        `extQ` (uncurry (++) . ((concat . gmapQ (go is_do)) &&& ((\case
+            BindStmt _ pat expr _ _ ->
+              let sa = sa_from_sym (Sym expr)
+              in if is_do
+                then [(pat, [sa {
+                    sa_loc = StmtFrame : sa_loc sa
+                  }])] -- TODO check if a fresh stack key here is the right thing to do
+                else [(pat, [sa])]
+            _ -> mempty
+          ) :: Stmt GhcTc (LHsExpr GhcTc) -> [Bind]))) -- TODO dangerous: should we really keep looking deeper after finding a BindStmt?
+        `extQ` ((\sym -> case sym of
+          HsApp _ _ _ -> mempty
+          HsLam _ _ -> mempty
+          HsDo _ _ _ -> concat $ gmapQ (go True) sym
+          _ -> concat $ gmapQ (go False) sym
+        ) :: HsExpr GhcTc -> [Bind]) -- guard against applications and lambdas, which introduce bindings we need to dig into a scope to bind
+      ) a
 
 -- data TyComp = SUBTY | SUPERTY | NOCOMP
 

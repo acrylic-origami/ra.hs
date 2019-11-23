@@ -299,9 +299,9 @@ reduce_deep sa@(SA consumers locstack stack m_sym args thread) =
                  -> let bind_pms@(PatMatchSyms {
                             pms_syms = next_explicit_binds,
                             pms_stmts = bind_stmts
-                          }) = pat_match $ map (second (map (\sa -> sa {
-                            sa_stack = stack,
-                            sa_loc = locstack
+                          }) = pat_match $ map (second (map (\sa' -> sa' {
+                            sa_stack = sa_stack sa' ++ stack,
+                            sa_loc = sa_loc sa' ++ locstack
                           }))) $ grhs_binds mg -- STACK questionable: do we need the new symbol here? Shouldn't it be  -- localize binds correctly via pushing next stack location
                         next_exprs = sub_sa_types_wo_stack sa $ grhs_exprs $ map (grhssGRHSs . m_grhss . unLoc) $ unLoc $ mg_alts mg
                         next_frame = AppFrame sa (SymTable {
