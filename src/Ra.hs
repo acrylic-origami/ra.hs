@@ -55,7 +55,7 @@ import Ra.Refs ( write_funs, read_funs )
 pat_match_one ::
   LPat GhcTc
   -> SymApp
-  -> Maybe (Map Id [SymApp])
+  -> Maybe LUT
 pat_match_one pat sa =
   case unLoc pat of
     ---------------------------------
@@ -118,13 +118,13 @@ pat_match_one pat sa =
       
     _ -> error $ constr_ppr pat
 
-or_pat_match_many :: [Bind] -> Maybe (Map Id [SymApp])
+or_pat_match_many :: [Bind] -> Maybe LUT
 or_pat_match_many = pat_match_many (\a b -> liftA2 (unionWith (++)) a b <|> a <|> b) -- could've been `<>` if that was `unionWith (++)` for these maps, but instead `union` destroys the rhs in collisions
 
-and_pat_match_many :: [Bind] -> Maybe (Map Id [SymApp])
+and_pat_match_many :: [Bind] -> Maybe LUT
 and_pat_match_many = pat_match_many (liftA2 (unionWith (++)))
 
-pat_match_many :: (Maybe (Map Id [SymApp]) -> Maybe (Map Id [SymApp]) -> Maybe (Map Id [SymApp])) -> [Bind] -> Maybe (Map Id [SymApp])
+pat_match_many :: (Maybe LUT -> Maybe LUT -> Maybe LUT) -> [Bind] -> Maybe LUT
 pat_match_many f = foldr1 f . map mapper
   where mapper (pat, exprs@(_:_)) = foldr1 f $ map (pat_match_one pat) exprs
         mapper _ = Nothing -- TODO being a little sloppy here, assuming that `Nothing` is an acceptable result for a default. In fact, note that if `f` was `const (const (Just mempty))` this would still return `Nothing` if there are single matches. Then there's a sharp phase change with 2 elems when they all pass. 
@@ -142,14 +142,15 @@ sub t sa = -- assumes incoming term is a normal form
           . map (\sa' ->
               let sa'' =
                     if | sa_has_stmts
-                       , Sym (L loc s'@(HsVar _ (L _ v'))) <- sa_sym sa'
+                       , Sym (L _ s'@(HsVar _ (L _ v'))) <- sa_sym sa'
                        , varString v' `elem` [ "newMVar", "newEmptyMVar", "newTVar", "newTVarIO", "newIORef", "newSTRef" ]
                        -> sa' {
-                          sa_sym = Sym (L (getSymLoc $ sa_sym sa) s'),
+                          sa_sym = setSymLoc (sa_sym sa') (getSymLoc $ sa_sym sa),
                           sa_loc = sa_loc subbed_sa
                         }
                        | sa_has_stmts
                        -> sa' {
+                         sa_sym = setSymLoc (sa_sym sa') (getSymLoc $ sa_sym sa), -- TODO propagation of location (hopefully this is right! Hopefully... re: anti-cycle based on location matching)
                          sa_loc = StmtFrame : sa_loc sa' -- propagation of statement
                        }
                        | otherwise -> sa'
@@ -158,7 +159,7 @@ sub t sa = -- assumes incoming term is a normal form
                 }
             )
         )
-      <$> (snd $ (sa, table_lookup v t)) -- DEBUG
+      <$> (snd $ (sa, t !? v)) -- DEBUG
     _ -> Nothing
 
 pat_match :: [Bind] -> PatMatchSyms
@@ -340,7 +341,7 @@ reduce_deep sa@(SA consumers locstack stack m_sym args thread) =
           if | varString v == "debug#" ->
                 -- DEBUG SYMBOL
                 mempty
-             | Just left_syms <- stack_var_lookup v stack ->
+             | Just left_syms <- stack `stack_var_lookup` v ->
               mconcat $ map (\sa' ->
                   reduce_deep sa' { -- TODO: check if `reduce_deep` is actually necessary here; might not be because we expect the symbols in the stack to be resolved
                     sa_args = sa_args sa' <> args', -- ARGS good: elements in the stack are already processed, so if their args are okay these ones are okay
@@ -372,8 +373,8 @@ reduce_deep sa@(SA consumers locstack stack m_sym args thread) =
                     "thenSTM"
                   ]
                  , i:o:[] <- args'
-                 , let reduce' = map ((\rs -> rs { rs_syms = map (\sa' -> sa' { sa_loc = StmtFrame : sa_loc sa }) (rs_syms rs) }) . reduce_deep)
-                       i' = reduce' i -- no need to reloc pipes: we dump the syms anyways
+                 , let reduce' = map ((\rs -> rs { rs_syms = map (\sa' -> sa' { sa_loc = StmtFrame : sa_loc sa }) (rs_syms rs) }) . reduce_deep) -- post-reduction tack StmtFrame
+                       i' = reduce' i
                        o' = reduce' o
                        next_rs = mconcat [i'' { rs_syms = mempty } <> o'' | i'' <- i', o'' <- o']-- combinatorial EXPLOSION! BOOM PEW PEW -- magical monad `*>` == `>>`: take right-hand syms, merge writes
                  -> next_rs {
@@ -432,7 +433,7 @@ reduce_deep sa@(SA consumers locstack stack m_sym args thread) =
                           let L _ (HsVar _ (L _ op)) = unHsWrap m_op
                               nf_arg1_syms = reduce_deep sa { sa_sym = Sym v, sa_args = [] }
                               arg0:args_rest = args
-                          in case stack_var_lookup op stack of
+                          in case stack `stack_var_lookup` op of
                             Just stack_exprs ->
                               mappend nf_arg1_syms { rs_syms = [] } $ mconcat $ map (\sa' ->
                                 reduce_deep $ sa' {

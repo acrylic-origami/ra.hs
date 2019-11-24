@@ -2,6 +2,8 @@
 module Ra.Lang (
   Sym(..),
   getSymLoc,
+  LUT,
+  Lookup,
   SymTable(..),
   Stack(..),
   StackKey,
@@ -100,6 +102,12 @@ getSymLoc (TupleConstr l) = l
 getSymLoc (ListConstr l) = l
 getSymLoc EntryPoint = noSrcSpan
 
+setSymLoc sym loc = case sym of
+  (Sym (L _ s)) -> Sym (L loc s)
+  (TupleConstr _) -> TupleConstr loc
+  (ListConstr _) -> ListConstr loc
+  EntryPoint -> EntryPoint
+
 instance Eq Sym where
   l == r = getSymLoc l == getSymLoc r
   
@@ -112,11 +120,14 @@ instance Eq Sym where
 --   }
   
 type Bind = (LPat GhcTc, [SymApp])
+type LUT = Map Id [SymApp]
 data SymTable = SymTable {
-  stbl_table :: Map Id [SymApp], -- strictly speaking, binds => table always, but it's so expensive both performance-wise and in code, so memoization does something good here
+  stbl_table :: LUT, -- strictly speaking, binds => table always, but it's so expensive both performance-wise and in code, so memoization does something good here
   stbl_binds :: [Bind]
 }
   deriving (Data, Typeable)
+
+type Lookup = LUT -> Id -> Maybe [SymApp]
 
 instance Semigroup SymTable where
   (SymTable ltbl lbinds) <> (SymTable rtbl rbinds) = SymTable (unionWith (++) ltbl rtbl) (lbinds <> rbinds)
