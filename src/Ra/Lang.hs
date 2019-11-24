@@ -2,6 +2,7 @@
 module Ra.Lang (
   Sym(..),
   getSymLoc,
+  setSymLoc,
   LUT,
   Lookup,
   SymTable(..),
@@ -11,7 +12,7 @@ module Ra.Lang (
   StackFrame(..),
   stack_eq,
   stack_var_lookup,
-  table_lookup,
+  soft_table_lookup,
   make_loc_key,
   -- make_thread_key,
   stack_apps,
@@ -392,25 +393,27 @@ stack_has_stmts = any (\case { StmtFrame -> True; _ -> False })
 -- stack_var_refs ((VarRefFrame v):rest) = v:(stack_var_refs' rest)
 -- stack_var_refs _ = []
 
-table_lookup :: Id -> Map Id [SymApp] -> Maybe [SymApp]
-table_lookup v tbl = uncurry (<|>) $ (
-    (!?v)
-    &&& listToMaybe . elems . filterWithKey (\q ->
-        const $ uncurry (&&) $ (
-            (==(varString v)) . varString
-            &&& isJust . flip inst_subty (varType v) . varType
-          ) q
-      )
+soft_table_lookup :: Lookup
+soft_table_lookup tbl v = listToMaybe $ elems $ filterWithKey (\q ->
+    const $ uncurry (&&) $ (
+        (==(varString v)) . varString -- const True
+        &&& isJust . flip inst_subty (varType v) . varType
+      ) q
   ) tbl
 
-stack_var_lookup :: Id -> Stack -> Maybe [SymApp]
-stack_var_lookup v =
-  let lookup = flip (<|>) . table_lookup v . stbl_table
-  in foldr (\case
-    AppFrame { af_syms } -> lookup af_syms
-    BindFrame { bf_syms } -> lookup bf_syms
-    _ -> id
-  ) Nothing
+stack_var_lookup :: Stack -> Id -> Maybe [SymApp]
+stack_var_lookup st v =
+  let folder syms = uncurry ($) . first ((<|>) . ($(stbl_table syms)))
+  in snd $ foldr (
+      (((!?v),).)
+      . (\case
+          AppFrame { af_syms } -> folder af_syms
+          BindFrame { bf_syms } -> folder bf_syms
+          _ -> snd
+        )
+    )
+    ((`soft_table_lookup` v), Nothing)
+    st
 
 update_head_table :: SymTable -> Stack -> Stack
 update_head_table next_table st = undefined {- update_head (second (uncurry (<>) . (,next_table))) st
