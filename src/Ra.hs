@@ -1,5 +1,7 @@
 {-# LANGUAGE Rank2Types, NamedFieldPuns, LambdaCase, TupleSections, MultiWayIf, DeriveDataTypeable #-}
 module Ra (
+  or_pat_match_many,
+  and_pat_match_many,
   pat_match,
   reduce_deep
 ) where
@@ -26,7 +28,7 @@ import Data.Function ( (&) )
 import Data.Maybe ( catMaybes, fromMaybe, maybeToList, isNothing )
 import Data.Data ( toConstr, Data(..), Typeable(..) )
 import Data.Generics ( everywhere, everywhereBut, GenericT(), everything, everythingBut, GenericQ(), mkQ, mkT, extQ, extT )
-import Data.Generics.Extra ( constr_ppr, everywhereWithContextLazyBut, everywhereWithContextBut, extQT, mkQT )
+import Data.Generics.Extra ( constr_ppr, GenericQT, gmapQT, everywhereWithContextLazyBut, everywhereWithContextBut, extQT, mkQT )
 import Data.Semigroup ( (<>) )
 import Data.Monoid ( mempty, mconcat )
 import Control.Monad ( join, guard, foldM )
@@ -132,32 +134,15 @@ pat_match_many f = foldr1 f . map mapper
 sub :: Map Id [SymApp] -> SymApp -> Maybe ReduceSyms
 sub t sa = -- assumes incoming term is a normal form
   let subbed_sa = sub_sa_types_wo_stack sa sa -- really hope this works
-      sa_has_stmts = stack_has_stmts (sa_loc subbed_sa)
   in case sa_sym subbed_sa of
     Sym (L loc s@(HsVar _ (L _ v))) -> (
           mconcat
           -- . map (\rs' ->
           --     let rss' = map (sub t) (rs_syms rs')
           --     in map (uncurry (id )) (zip rss' (rs_syms rs')))
-          . map (\sa' ->
-              let sa'' =
-                    if | sa_has_stmts
-                       , Sym (L _ s'@(HsVar _ (L _ v'))) <- sa_sym sa'
-                       , varString v' `elem` [ "newMVar", "newEmptyMVar", "newTVar", "newTVarIO", "newIORef", "newSTRef" ]
-                       -> sa' {
-                          sa_sym = setSymLoc (sa_sym sa') (getSymLoc $ sa_sym sa),
-                          sa_loc = sa_loc subbed_sa
-                        }
-                       | sa_has_stmts
-                       -> sa' {
-                         sa_sym = setSymLoc (sa_sym sa') (getSymLoc $ sa_sym sa), -- TODO propagation of location (hopefully this is right! Hopefully... re: anti-cycle based on location matching)
-                         sa_loc = StmtFrame : sa_loc sa' -- propagation of statement
-                       }
-                       | otherwise -> sa'
-              in reduce_deep sa'' {
-                  sa_args = (sa_args sa'') <> (sa_args subbed_sa)
-                }
-            )
+          . map (\sa' -> reduce_deep sa' {
+                sa_args = (sa_args sa') <> (sa_args subbed_sa)
+              })
         )
       <$> (snd $ (sa, t !? v)) -- DEBUG
     _ -> Nothing
@@ -170,24 +155,43 @@ pat_match binds =
                   , Just next_table <- or_pat_match_many binds
                   = let f0 :: Data b => b -> (Maybe ReduceSyms, b)
                         f0 b = (Nothing, b)
-                        (m_next_rs, next_pms) =
-                          everywhereWithContextLazyBut
-                            (<>)
-                            (False `mkQ` (const True :: Stack -> Bool))
-                            (
-                                f0 `mkQT` (
-                                    (mconcat *** concat)
-                                    . unzip . map (
-                                        (
-                                            fst
-                                            &&& uncurry (flip fromMaybe) . (fmap rs_syms *** pure)
-                                          )
-                                        . (sub next_table &&& id)
-                                      )
-                                  )
-                              )
-                            mempty
-                            pms
+                        
+                        reloc :: SymApp -> SymApp -> SymApp
+                        reloc sa sa' =
+                          if | Sym (L _ s'@(HsVar _ (L _ v'))) <- sa_sym sa'
+                             , varString v' `elem` [ "newMVar", "newEmptyMVar", "newTVar", "newTVarIO", "newIORef", "newSTRef" ]
+                             -> sa' {
+                                sa_sym = setSymLoc (sa_sym sa') (getSymLoc $ sa_sym sa),
+                                sa_loc = sa_loc sa
+                              }
+                             | otherwise
+                             -> sa' {
+                               sa_sym = setSymLoc (sa_sym sa') (getSymLoc $ sa_sym sa), -- TODO propagation of location (hopefully this is right! Hopefully... re: anti-cycle based on location matching)
+                               sa_loc = StmtFrame : sa_loc sa' -- propagation of statement
+                             }
+                             | otherwise -> sa'
+                        
+                        sub_with_reloc :: Bool -> GenericQT (Maybe ReduceSyms)
+                        sub_with_reloc is_first =
+                          first mconcat . (
+                              gmapQT (sub_with_reloc is_first)
+                              `mkQT` (\a' ->
+                                  let (s', a'') = gmapQT (sub_with_reloc False) a'
+                                      (s, a''') = second concat $ unzip $ map (\sa ->
+                                          let sa_has_stmts = is_monadic (sa_loc sa)
+                                              (next_rs, next_sas) = (fst &&& uncurry (flip fromMaybe) . (fmap rs_syms *** pure)) $ (sub next_table sa, sa)
+                                          in (
+                                              next_rs,
+                                              if is_first
+                                                then map (reloc sa) next_sas
+                                                else next_sas
+                                            )
+                                        ) a''
+                                  in (s <> s', a''')
+                                )
+                              `extQT` ((mempty,) :: Stack -> ([Maybe ReduceSyms], Stack))
+                            )
+                        (m_next_rs, next_pms) = sub_with_reloc True pms
                     in (
                         isNothing m_next_rs,
                         -- INVARIANT below is identical to pms if m_next_rs is empty. Difficult to prove because of generic transformation.

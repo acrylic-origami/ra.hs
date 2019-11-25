@@ -16,7 +16,7 @@ module Ra.Lang (
   make_loc_key,
   -- make_thread_key,
   stack_apps,
-  stack_has_stmts,
+  is_monadic,
   update_head_table,
   ReduceSyms(..),
   PatMatchSyms(..),
@@ -385,8 +385,11 @@ make_loc_key = uncurry (:) . (
 stack_apps :: Stack -> [StackFrame]
 stack_apps = filter (\case { AppFrame {} -> True; _ -> False })
 
-stack_has_stmts :: Stack -> Bool
-stack_has_stmts = any (\case { StmtFrame -> True; _ -> False })
+is_monadic :: Stack -> Bool
+is_monadic (AppFrame{}:_) = False
+is_monadic (StmtFrame:_) = True
+is_monadic (_:rest) = is_monadic rest
+is_monadic [] = False
 
 -- stack_var_refs used for the law that var resolution cycles only apply to the tail
 -- stack_var_refs :: Stack -> [Id]
