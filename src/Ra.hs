@@ -301,20 +301,17 @@ reduce_deep sa@(SA consumers locstack stack m_sym args thread) =
                  , Just next_arg_matches <- if length next_arg_binds > 0
                     then and_pat_match_many next_arg_binds -- `and` here because we need to stop evaluating if this alternative doesn't match the input
                     else Just mempty -- NOTE no recursive pattern matching needed here because argument patterns are purely deconstructive and can't refer to the new bindings the others make
-                 -> let bind_pms@(PatMatchSyms {
-                            pms_syms = next_explicit_binds,
-                            pms_stmts = bind_stmts
-                          }) = pat_match $ map (second (map (\sa' -> sa' {
+                 -> let bind_pms = pat_match $ map (second (map (\sa' -> sa' {
                             sa_stack = sa_stack sa' ++ stack,
                             sa_loc = sa_loc sa' ++ locstack
                           }))) $ grhs_binds mg -- STACK questionable: do we need the new symbol here? Shouldn't it be  -- localize binds correctly via pushing next stack location
                         next_exprs = sub_sa_types_wo_stack sa $ grhs_exprs $ map (grhssGRHSs . m_grhss . unLoc) $ unLoc $ mg_alts mg
-                        next_frame = AppFrame sa (SymTable {
+                        next_frames = BindFrame (pms_syms bind_pms) : [AppFrame sa (SymTable {
                             stbl_table = next_arg_matches,
                             stbl_binds = next_arg_binds
-                          } <> next_explicit_binds)
-                        next_stack = (next_frame:) stack
-                        next_loc = (next_frame:) locstack
+                          })]
+                        next_stack = (next_frames++) stack
+                        next_loc = (next_frames++) locstack
                         next_args = drop (matchGroupArity mg) args
                     in mempty {
                       rs_stmts = pms_stmts bind_pms

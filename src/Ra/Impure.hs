@@ -7,12 +7,12 @@ module Ra.Impure (
 
 import GHC
 
-import Data.Maybe ( catMaybes, fromMaybe )
-import Data.Generics ( Data, Typeable )
-import Data.Generics.Extra ( everywhereWithContextBut, mkQT, extQT )
+import Data.Maybe ( catMaybes, fromMaybe, fromJust )
+import Data.Generics ( Data, Typeable, mkQ )
+import Data.Generics.Extra ( everywhereWithContextBut, everywhereWithContextLazyBut, mkQT, extQT )
 import Control.Arrow ( (&&&), (***), first, second )
 
-import Ra ( reduce_deep, pat_match )
+import Ra ( reduce_deep, pat_match, and_pat_match_many )
 import Ra.Lang
 import Ra.Extra
 import Ra.GHC.Util ( varString )
@@ -56,15 +56,29 @@ mk_write sa | Sym (L _ (HsVar _ (L _ v))) <- sa_sym sa =
              | otherwise = mempty
 
 
-refresh_app_frames :: Stack -> (PatMatchSyms, Stack)
-refresh_app_frames st = first mconcat $ unzip $ map (\frame -> case frame of
-    AppFrame {} ->
-      let next_pms = pat_match $ stbl_binds $ af_syms frame
-      in (next_pms, frame {
-        af_syms = pms_syms next_pms
-      })
-    _ -> (mempty, frame)
-  ) st
+refresh_frames :: Writes -> Stack -> (PatMatchSyms, Stack)
+refresh_frames ws st = first mconcat $ unzip $ map (\frame ->
+    case frame of
+      AppFrame { af_syms } ->
+        (mempty,
+            if not $ null $ stbl_binds af_syms
+              then frame {
+                  af_syms = af_syms {
+                    stbl_table = fromJust $ and_pat_match_many $ stbl_binds af_syms -- fromJust <= changes can't regress on these binds: only make it more likely to bind. If this AppFrame exists, it must have succeeded the first time at least
+                  }
+                }
+              else frame
+          )
+      BindFrame { bf_syms } ->
+        -- Note: forces argument ws a bit awkwardly; needs its own handler
+        -- outside of generic query because otherwise it'll cause infinite
+        -- recursion, and `extQT` was even more awkward
+        
+        let next_binds = map (second (expand_reads ws)) (stbl_binds bf_syms)
+            next_pms = pat_match next_binds
+        in (next_pms, BindFrame (pms_syms next_pms))
+      _ -> (mempty, frame)
+  ) st -- DEBUG
 
 unref :: Writes -> SymApp -> [SymApp]
 unref ws sa =
@@ -78,7 +92,7 @@ unref ws sa =
                   GT -> (,sas)
                   EQ -> (,sas <> next_sas)
                   LT -> (,next_sas)
-                ) $ compare max_len sa')
+                ) $ compare max_len sa') -- DEBUG
                 (snd ((sa, pipes), m_next_max_len)) -- DEBUG
                 <*> fmap (max max_len) m_next_max_len
           in if | elem (getSymLoc $ sa_sym sa) $ map (getSymLoc . sa_sym) pipes
@@ -93,8 +107,6 @@ unref ws sa =
 
 
 type WriteSite = (Stack, Stack) -- pipe and value locations
-newtype Q a b = Q (Maybe (a, b)) deriving (Data, Typeable)
-unQ (Q z) = z
 
 permute2 = concatMap (\(pipes, syms) -> [(pipe, sym) | pipe <- pipes, sym <- syms]) -- TODO stopgap before implementing Map
 
@@ -103,23 +115,26 @@ reduce syms0 =
   let iterant :: [DoStmt] -> (Writes, ReduceSyms) -- always act on syms0, return what we get on this phase
       iterant stmts =
         let writes = catMaybes $ map mk_write stmts
-            (next_stmts, next_rs) = everywhereWithContextBut (<>) (unQ . (
-                (Q . Just . (mempty,))
-                `mkQT` (Q . Just . (\sa ->
-                    (mconcat *** concat)
-                    $ unzip
-                    $ map (\sa ->
-                        let (next_pms, next_stack) = refresh_app_frames $ sa_stack sa -- re-pat-match the bindings 
-                            next_rs = reduce_deep $ sa { sa_stack = next_stack }
-                        in (
-                            pms_stmts next_pms <> rs_stmts next_rs,
-                            rs_syms next_rs
+            f0 = (mempty,)
+            (next_stmts, next_rs) = everywhereWithContextLazyBut
+                (<>)
+                (False `mkQ` (\case { BindFrame {} -> True; _ -> False } :: StackFrame -> Bool))
+                (
+                    f0
+                    `mkQT` (\sas ->
+                        (mconcat *** concat)
+                        $ unzip
+                        $ map (\sa ->
+                            let (next_pms, next_stack) = refresh_frames writes $ sa_stack sa -- re-pat-match the bindings 
+                                next_rs = reduce_deep $ sa { sa_stack = next_stack }
+                            in (
+                                pms_stmts next_pms <> rs_stmts next_rs,
+                                rs_syms next_rs
+                              )
                           )
+                        $ expand_reads writes sas -- DEBUG
                       )
-                    $ expand_reads writes sa
-                  ))
-                `extQT` (const (Q Nothing) :: Stack -> Q [DoStmt] Stack) -- TODO URGENT it is probably not correct to skip replacement into the stack: we also have to substitute bindings in there in case they need to match. However, the knotted table is going to be tricky: will need to totally reknot the table, which might be done by PMS?
-              )) mempty syms0
+                  ) mempty syms0
         in (writes, next_rs {
           rs_stmts = rs_stmts next_rs <> next_stmts
         })

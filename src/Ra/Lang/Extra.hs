@@ -6,7 +6,8 @@ module Ra.Lang.Extra (
   ppr_rs,
   ppr_pms,
   ppr_stack,
-  ppr_table
+  ppr_table,
+  ppr_binds
   -- ppr_writes
 ) where
 
@@ -87,8 +88,14 @@ ppr_pms show' = flip concatMap printers . (("\n===\n"++).) . flip ($) where
 --       VarRefFrame v -> show' v
 --     )
 
+ppr_binds :: Printer -> [Bind] -> String
+ppr_binds show' = unlines . map (uncurry (++) . ((++" -> ") . show' *** concat . intersperse ", " . map (ppr_sa show')))
+
 ppr_table :: Printer -> SymTable -> String
-ppr_table show' = foldr ((++) . (++"\n\n") . uncurry (++) . (((++", ") . show') *** concatMap (show' . sa_sym))) "" . M.assocs . stbl_table
+ppr_table show' = uncurry (++) . (
+    foldr ((++) . (++"\n\n") . uncurry (++) . (((++", ") . show') *** concatMap (show' . sa_sym))) "" . M.assocs . stbl_table
+    &&& ppr_binds show' . stbl_binds
+  )
 
 ppr_stack :: Printer -> Stack -> String
 ppr_stack show' = foldr (\case
