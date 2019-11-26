@@ -149,59 +149,57 @@ sub t sa = -- assumes incoming term is a normal form
 
 pat_match :: [Bind] -> PatMatchSyms
 pat_match binds = 
-  let iterant :: PatMatchSyms -> (Bool, PatMatchSyms)
-      iterant pms | let binds = stbl_binds $ pms_syms pms
-                  , length binds > 0
-                  , Just next_table <- or_pat_match_many binds
-                  = let f0 :: Data b => b -> (Maybe ReduceSyms, b)
-                        f0 b = (Nothing, b)
-                        
-                        reloc :: SymApp -> SymApp -> SymApp
-                        reloc sa sa' =
-                          if | Sym (L _ s'@(HsVar _ (L _ v'))) <- sa_sym sa'
-                             , varString v' `elem` [ "newMVar", "newEmptyMVar", "newTVar", "newTVarIO", "newIORef", "newSTRef" ]
-                             -> sa' {
-                                sa_sym = setSymLoc (sa_sym sa') (getSymLoc $ sa_sym sa),
-                                sa_loc = sa_loc sa
-                              }
-                             | otherwise
-                             -> sa' {
-                               sa_sym = setSymLoc (sa_sym sa') (getSymLoc $ sa_sym sa), -- TODO propagation of location (hopefully this is right! Hopefully... re: anti-cycle based on location matching)
-                               sa_loc = StmtFrame : sa_loc sa' -- propagation of statement
-                             }
-                             | otherwise -> sa'
-                        
-                        sub_with_reloc :: Bool -> GenericQT (Maybe ReduceSyms)
-                        sub_with_reloc is_first =
-                          first mconcat . (
-                              gmapQT (sub_with_reloc is_first)
-                              `mkQT` (\a' ->
-                                  let (s', a'') = gmapQT (sub_with_reloc False) a'
-                                      (s, a''') = second concat $ unzip $ map (\sa ->
-                                          let sa_has_stmts = is_monadic (sa_loc sa)
-                                              (next_rs, next_sas) = (fst &&& uncurry (flip fromMaybe) . (fmap rs_syms *** pure)) $ (sub next_table sa, sa)
-                                          in (
-                                              next_rs,
-                                              if is_first
-                                                then map (reloc sa) next_sas
-                                                else next_sas
-                                            )
-                                        ) a''
-                                  in (s <> s', a''')
-                                )
-                              `extQT` ((mempty,) :: Stack -> ([Maybe ReduceSyms], Stack))
-                            )
-                        (m_next_rs, next_pms) = sub_with_reloc True pms
-                    in (
-                        isNothing m_next_rs,
-                        -- INVARIANT below is identical to pms if m_next_rs is empty. Difficult to prove because of generic transformation.
-                        next_pms {
-                          pms_stmts = pms_stmts next_pms <> fromMaybe mempty (rs_stmts <$> m_next_rs)
-                        }
-                      )  
-                  | otherwise = (True, pms)    
+  let dig :: LUT -> GenericQT [DoStmt]
+      dig table = dig' 0 where
+        dig' :: Int -> GenericQT [DoStmt]
+        dig' n | n < max_iter -- dig' nominally takes either [SymApp] (interally) or PatMatchSyms (externally)
+               = go True where
+                go :: Bool -> GenericQT [DoStmt]
+                go is_first = first mconcat . ( -- not in love with outer mconcat but it's more common among the queries than it is uncommon
+                    gmapQT (go is_first)
+                    `mkQT` (
+                        second concat
+                        . unzip . map (\sa ->
+                            second (map (\sa' ->
+                              if is_first && is_monadic (sa_loc sa)
+                                then reloc sa sa'
+                                else sa'
+                            )) $ (
+                              if | Just next_rs <- sub table sa
+                                 , (next_stmts, next_sas) <- dig' (n + 1) (rs_syms next_rs)
+                                 -> (rs_stmts next_rs <> next_stmts, next_sas)
+                                 | otherwise
+                                 -> (mconcat *** pure) $ gmapQT (go False) sa
+                              )
+                          )
+                      )
+                    `extQT` ((mempty,) :: Stack -> ([[DoStmt]], Stack))
+                  )
+        dig' _ = undefined
+        
+        reloc :: SymApp -> SymApp -> SymApp
+        reloc sa sa' =
+          if | Sym (L _ s'@(HsVar _ (L _ v'))) <- sa_sym sa'
+             , varString v' `elem` [ "newMVar", "newEmptyMVar", "newTVar", "newTVarIO", "newIORef", "newSTRef" ]
+             -> sa' {
+                sa_sym = setSymLoc (sa_sym sa') (getSymLoc $ sa_sym sa),
+                sa_loc = sa_loc sa
+              }
+             | otherwise
+             -> sa' {
+               sa_sym = setSymLoc (sa_sym sa') (getSymLoc $ sa_sym sa), -- TODO propagation of location (hopefully this is right! Hopefully... re: anti-cycle based on location matching)
+               sa_loc = StmtFrame : sa_loc sa' -- propagation of statement
+             }
+             | otherwise -> sa'
       
       (rs0, binds0) = first mconcat $ unzip $ map ((\(pat, rs) -> (rs, (pat, rs_syms rs))) . second (mconcat . map reduce_deep)) binds -- don't assume any symapps coming in are NF
+      pms0 = PatMatchSyms {
+        pms_stmts = rs_stmts rs0,
+        pms_syms = mempty {
+          stbl_binds = binds0
+        }
+      }
+      
       max_iter :: Int
       max_iter =
         let get_ids = everythingBut (<>) (
@@ -220,15 +218,7 @@ pat_match binds =
             (gr, nodemap) = mkMapGraph nodes flat_binds
         in (+1) $ foldl max 0 $ map (length . levels) $ dff (map fst $ fst $ mkNodes nodemap nodes) gr
         
-      (iter, (_, pmsn)) = until
-        (uncurry (||) . ((>=max_iter) *** fst))
-        ((+1) *** (iterant . snd))
-        (0, (False, PatMatchSyms {
-            pms_stmts = rs_stmts rs0,
-            pms_syms = mempty {
-              stbl_binds = binds0
-            }
-          }))
+      (stmtsn, pmsn) = dig (fromMaybe mempty $ or_pat_match_many binds0) pms0
       
       tie_to_table :: Data d => d -> d
       tie_to_table = mkT (\sa -> sa {
