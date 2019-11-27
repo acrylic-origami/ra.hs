@@ -137,6 +137,7 @@ reduce syms0 =
                 `extQT` ((\fr -> case fr of { BindFrame {} -> f0 fr; _ -> gmapQT go fr }) :: StackFrame -> ([[DoStmt]], StackFrame))
               )
             (next_stmts, next_rs) = go syms0
+
         in (writes, next_rs {
           rs_stmts = rs_stmts next_rs <> next_stmts
         })
