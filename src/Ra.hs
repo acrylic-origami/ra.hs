@@ -175,7 +175,7 @@ pat_match binds =
                       )
                     `extQT` ((mempty,) :: Stack -> ([[DoStmt]], Stack))
                   )
-        dig' _ = undefined
+        dig' _ = (mempty,)
         
         reloc :: SymApp -> SymApp -> SymApp
         reloc sa sa' =

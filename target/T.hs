@@ -5,12 +5,14 @@ module T where
   
   bot x = bot x
   bar = do
-    let v = newEmptyMVar
-    v0 <- v
-    v1 <- v
-    putMVar v0 42
+    let bar _ = newEmptyMVar
+    v0 <- bar ()
+    v1 <- bar ()
+    putMVar v1 1
+    r1 <- readMVar v1
     r0 <- readMVar v0
-    putMVar v0 r0
+    putMVar v0 r1
+    putMVar v1 r0
     readMVar v0
   
   -- newtype Roll a = Roll (Roll a -> a)
