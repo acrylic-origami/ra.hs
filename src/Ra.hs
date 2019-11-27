@@ -43,7 +43,7 @@ import Data.Graph.Inductive.NodeMap ( mkMapGraph, mkNodes )
 import Data.Map.Strict ( Map(..), unionsWith, unions, unionWith, union, singleton, (!?), (!), foldlWithKey, foldrWithKey, keys, mapWithKey, assocs)
 import qualified Data.Map.Strict as M ( null, member, empty, insert, map, elems )
 import Data.Set ( Set(..), intersection, difference, (\\) )
-import qualified Data.Set as S ( fromList, member, insert )
+import qualified Data.Set as S ( fromList, member, insert, size )
 -- import qualified Data.Set as S ( insert )
 
 import qualified Ra.Refs as Refs
@@ -202,17 +202,21 @@ pat_match binds =
       
       max_iter :: Int
       max_iter =
-        let get_ids = everythingBut (<>) (
+        let get_ids :: GenericQ [Id]
+            get_ids = everythingBut (<>) (
               ([], False)
               `mkQ` ((,False) . pure :: Id -> ([Id], Bool))
               `extQ` (const ([], True) :: Stack -> ([Id], Bool)))
-            flat_binds = concatMap (
-                (\(patvars, expvars) -> [
-                    (patvar, expvar, ())
+            -- in S.size $ S.fromList (get_ids binds0) -- fallback: much simpler, slightly looser bound than graph traversal, probably more robust
+            
+            (patvars, expvars) = mconcat $ map (get_ids *** get_ids) binds0
+            expvars' = filter (`elem` patvars) expvars
+            
+            flat_binds = [
+                (patvar, expvar, ())
                   | patvar <- patvars
-                  , expvar <- expvars ])
-                . ( get_ids &&& get_ids )
-              ) binds0
+                  , expvar <- expvars'
+              ]
             nodes = map (\(x,_,_) -> x) flat_binds
             gr :: Gr Id ()
             (gr, nodemap) = mkMapGraph nodes flat_binds
