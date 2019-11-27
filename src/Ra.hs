@@ -187,9 +187,9 @@ pat_match binds =
               }
              | otherwise
              -> sa' {
-               sa_sym = setSymLoc (sa_sym sa') (getSymLoc $ sa_sym sa), -- TODO propagation of location (hopefully this is right! Hopefully... re: anti-cycle based on location matching)
-               sa_loc = StmtFrame : sa_loc sa' -- propagation of statement
-             }
+                sa_sym = setSymLoc (sa_sym sa') (getSymLoc $ sa_sym sa), -- TODO propagation of location (hopefully this is right! Hopefully... re: anti-cycle based on location matching)
+                sa_loc = StmtFrame : sa_loc sa' -- propagation of statement
+              }
              | otherwise -> sa'
       
       (rs0, binds0) = first mconcat $ unzip $ map ((\(pat, rs) -> (rs, (pat, rs_syms rs))) . second (mconcat . map reduce_deep)) binds -- don't assume any symapps coming in are NF
@@ -295,15 +295,16 @@ reduce_deep sa@(SA consumers locstack stack m_sym args thread) =
                  , Just next_arg_matches <- if length next_arg_binds > 0
                     then and_pat_match_many next_arg_binds -- `and` here because we need to stop evaluating if this alternative doesn't match the input
                     else Just mempty -- NOTE no recursive pattern matching needed here because argument patterns are purely deconstructive and can't refer to the new bindings the others make
-                 -> let bind_pms = pat_match $ map (second (map (\sa' -> sa' {
-                            sa_stack = sa_stack sa' ++ stack,
-                            sa_loc = sa_loc sa' ++ locstack
-                          }))) $ grhs_binds mg -- STACK questionable: do we need the new symbol here? Shouldn't it be  -- localize binds correctly via pushing next stack location
-                        next_exprs = sub_sa_types_wo_stack sa $ grhs_exprs $ map (grhssGRHSs . m_grhss . unLoc) $ unLoc $ mg_alts mg
-                        next_frames = BindFrame (pms_syms bind_pms) : [AppFrame sa (SymTable {
+                 -> let next_af = AppFrame sa (SymTable {
                             stbl_table = next_arg_matches,
                             stbl_binds = next_arg_binds
-                          })]
+                          })
+                        next_exprs = sub_sa_types_wo_stack sa $ grhs_exprs $ map (grhssGRHSs . m_grhss . unLoc) $ unLoc $ mg_alts mg
+                        bind_pms = pat_match $ map (second (map (\sa' -> sa' {
+                            sa_stack = sa_stack sa' ++ (next_af : stack),
+                            sa_loc = sa_loc sa' ++ (next_af : locstack)
+                          }))) $ grhs_binds mg -- STACK questionable: do we need the new symbol here? Shouldn't it be  -- localize binds correctly via pushing next stack location
+                        next_frames = [BindFrame (pms_syms bind_pms), next_af]
                         next_stack = (next_frames++) stack
                         next_loc = (next_frames++) locstack
                         next_args = drop (matchGroupArity mg) args

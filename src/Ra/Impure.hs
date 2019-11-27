@@ -124,14 +124,18 @@ reduce syms0 =
                 gmapQT go
                 `mkQT` (
                     (\(st0, (st1, sas)) -> (st0 <> st1, sas))
-                    . second (mconcat . map (\sa ->
-                        let (next_pms, next_sa) = refresh_frames writes sa -- re-pat-match the bindings 
-                            next_rs = reduce_deep $ next_sa
-                        in (
-                            [pms_stmts next_pms, rs_stmts next_rs],
-                            concatMap (expand_reads writes) (rs_syms next_rs)
+                    . second (
+                        mconcat
+                        . map (\sa ->
+                            let (next_pms, next_sa) = refresh_frames writes sa -- re-pat-match the bindings 
+                                next_rs = reduce_deep $ next_sa
+                            in (
+                                [pms_stmts next_pms, rs_stmts next_rs],
+                                rs_syms next_rs
+                              )
                           )
-                      ))
+                        . concatMap (expand_reads writes)
+                      )
                     . gmapQT go
                   )
                 `extQT` ((\fr -> case fr of { BindFrame {} -> f0 fr; _ -> gmapQT go fr }) :: StackFrame -> ([[DoStmt]], StackFrame))
