@@ -9,7 +9,7 @@ import GHC
 
 import Data.Maybe ( catMaybes, fromMaybe, fromJust )
 import Data.Generics ( Data, Typeable, mkQ )
-import Data.Generics.Extra ( everywhereWithContextBut, everywhereWithContextLazyBut, mkQT, extQT )
+import Data.Generics.Extra ( everywhereWithContextBut, everywhereWithContextLazyBut, mkQT, extQT, gmapQT, GenericQT )
 import Control.Arrow ( (&&&), (***), first, second )
 
 import Ra ( reduce_deep, pat_match, and_pat_match_many )
@@ -56,29 +56,32 @@ mk_write sa | Sym (L _ (HsVar _ (L _ v))) <- sa_sym sa =
              | otherwise = mempty
 
 
-refresh_frames :: Writes -> Stack -> (PatMatchSyms, Stack)
-refresh_frames ws st = first mconcat $ unzip $ map (\frame ->
-    case frame of
-      AppFrame { af_syms } ->
-        (mempty,
-            if not $ null $ stbl_binds af_syms
-              then frame {
-                  af_syms = af_syms {
-                    stbl_table = fromJust $ and_pat_match_many $ stbl_binds af_syms -- fromJust <= changes can't regress on these binds: only make it more likely to bind. If this AppFrame exists, it must have succeeded the first time at least
-                  }
-                }
-              else frame
-          )
-      BindFrame { bf_syms } ->
-        -- Note: forces argument ws a bit awkwardly; needs its own handler
-        -- outside of generic query because otherwise it'll cause infinite
-        -- recursion, and `extQT` was even more awkward
-        
-        let next_binds = map (second (expand_reads ws)) (stbl_binds bf_syms)
-            next_pms = pat_match next_binds
-        in (next_pms, BindFrame (pms_syms next_pms))
-      _ -> (mempty, frame)
-  ) st -- DEBUG
+refresh_frames :: Writes -> SymApp -> (PatMatchSyms, SymApp)
+refresh_frames ws sa =
+  let (next_pms, next_stack) =
+        first mconcat $ unzip $ map (\frame ->
+            case frame of
+              AppFrame { af_syms } ->
+                (mempty,
+                    if not $ null $ stbl_binds af_syms
+                      then frame {
+                          af_syms = af_syms {
+                            stbl_table = fromJust $ and_pat_match_many $ stbl_binds af_syms -- fromJust <= changes can't regress on these binds: only make it more likely to bind. If this AppFrame exists, it must have succeeded the first time at least
+                          }
+                        }
+                      else frame
+                  )
+              BindFrame { bf_syms } ->
+                -- Note: forces argument ws a bit awkwardly; needs its own handler
+                -- outside of generic query because otherwise it'll cause infinite
+                -- recursion, and `extQT` was even more awkward
+                
+                let next_binds = snd (sa, map (second (concatMap (expand_reads ws))) (stbl_binds bf_syms)) -- DEBUG
+                    next_pms = pat_match next_binds
+                in (next_pms, BindFrame (pms_syms next_pms))
+              _ -> (mempty, frame)
+          ) (sa_stack sa) -- DEBUG
+  in (next_pms, sa { sa_stack = next_stack })
 
 unref :: Writes -> SymApp -> [SymApp]
 unref ws sa =
@@ -116,25 +119,25 @@ reduce syms0 =
       iterant stmts =
         let writes = catMaybes $ map mk_write stmts
             f0 = (mempty,)
-            (next_stmts, next_rs) = everywhereWithContextLazyBut
-                (<>)
-                (False `mkQ` (\case { BindFrame {} -> True; _ -> False } :: StackFrame -> Bool))
-                (
-                    f0
-                    `mkQT` (\sas ->
-                        (mconcat *** concat)
-                        $ unzip
-                        $ map (\sa ->
-                            let (next_pms, next_stack) = refresh_frames writes $ sa_stack sa -- re-pat-match the bindings 
-                                next_rs = reduce_deep $ sa { sa_stack = next_stack }
-                            in (
-                                pms_stmts next_pms <> rs_stmts next_rs,
-                                rs_syms next_rs
-                              )
+            go :: GenericQT [DoStmt]
+            go = first mconcat . (
+                gmapQT go
+                `mkQT` (
+                    (\(st0, (st1, sas)) -> (st0 <> st1, sas))
+                    . second (mconcat . map (\sa ->
+                        let (next_pms, next_sa) = refresh_frames writes sa -- re-pat-match the bindings 
+                            next_rs = reduce_deep $ next_sa
+                        in (
+                            [pms_stmts next_pms, rs_stmts next_rs],
+                            concatMap (expand_reads writes) (rs_syms next_rs)
                           )
-                        $ expand_reads writes sas -- DEBUG
-                      )
-                  ) mempty syms0
+                      ))
+                    . gmapQT go
+                  )
+                `extQT` ((\fr -> case fr of { BindFrame {} -> f0 fr; _ -> gmapQT go fr }) :: StackFrame -> ([[DoStmt]], StackFrame))
+              )
+            (next_stmts, next_rs) = go syms0
+
         in (writes, next_rs {
           rs_stmts = rs_stmts next_rs <> next_stmts
         })
@@ -155,43 +158,45 @@ in if sa_loc sa `elem` map fst reads && sa_loc sa' `elem` map snd reads
   else ([(sa_loc sa, sa_loc sa')], nf_sas)
 -}
 
-expand_reads :: [Write] -> [SymApp] -> [SymApp]
-expand_reads ws = mconcat . map (\sa ->
-  let next_read_syms
-        | arg0:rest <- sa_args sa = mconcat $ map (\sa' ->
-            case sa_sym sa' of
-              Sym (L _ (HsVar _ (L _ v')))
-                | varString v' `elem` [
-                    "newMVar", -- DEBUG
-                    "newEmptyMVar",
-                    "newTVar",
-                    "newTVarIO",
-                    "newIORef",
-                    "newSTRef"
-                  ] -> unref ws (sa' { sa_args = rest })
-                | otherwise -> [sa']
-          ) arg0
-        | otherwise = [sa]
-    in case sa_sym sa of
-      Sym (L _ (HsVar _ (L _ v))) ->
-        if | varString v `elem` [
-              "readIORef",
-              "readMVar",
-              "takeMVar",
-              "readTVar",
-              "readTVarIO",
-              "readSTRef",
-              
-              "atomicSwapIORef"
-            ]
-           -> next_read_syms
-           
-           | varString v == "atomicModifyIORefLazy_"
-           -> map (\sa -> sa {
-              sa_sym = TupleConstr (getSymLoc $ sa_sym sa),
-              sa_args = [[sa], [sa]]
-            }) next_read_syms
-           
-           | otherwise -> [sa]
-      _ -> [sa]
-  )
+expand_reads :: [Write] -> SymApp -> [SymApp]
+expand_reads = expand_reads' 0 where
+  expand_reads' n ws sa
+    | n < sum (map (length . fst) ws) = -- reeeeeeeally crude upper bound for now
+      let next_read_syms
+            | arg0:rest <- sa_args sa = mconcat $ map (\sa' ->
+                case sa_sym sa' of
+                  Sym (L _ (HsVar _ (L _ v')))
+                    | varString v' `elem` [
+                        "newMVar", -- DEBUG
+                        "newEmptyMVar",
+                        "newTVar",
+                        "newTVarIO",
+                        "newIORef",
+                        "newSTRef"
+                      ] -> concatMap (expand_reads' (n + 1) ws) $ unref ws (sa' { sa_args = rest })
+                    | otherwise -> [sa']
+              ) arg0
+            | otherwise = [sa]
+      in case sa_sym sa of
+        Sym (L _ (HsVar _ (L _ v))) ->
+          if | varString v `elem` [
+                "readIORef",
+                "readMVar",
+                "takeMVar",
+                "readTVar",
+                "readTVarIO",
+                "readSTRef",
+                
+                "atomicSwapIORef"
+              ]
+             -> snd (sa, next_read_syms) -- DEBUG
+             
+             | varString v == "atomicModifyIORefLazy_"
+             -> map (\sa -> sa {
+                sa_sym = TupleConstr (getSymLoc $ sa_sym sa),
+                sa_args = [[sa], [sa]]
+              }) next_read_syms
+             
+             | otherwise -> [sa]
+        _ -> [sa]
+    | otherwise = [sa]
