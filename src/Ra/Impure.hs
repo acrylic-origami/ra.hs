@@ -147,7 +147,7 @@ reduce syms0 =
         })
         
   in map snd
-    $ head
+    $ (!!1)
     $ filter ((\(last_writes, next_rs) ->
         let next_writes_map = map (both sa_loc) $ permute2 $ catMaybes $ map mk_write $ rs_stmts next_rs
             last_writes_map = map (both sa_loc) $ permute2 last_writes

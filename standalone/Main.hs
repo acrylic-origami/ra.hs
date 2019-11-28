@@ -37,11 +37,14 @@ module Main where
   import Ra.GHC.Util ( varString )
   import Ra.Lang -- ( SymTable, Sym(..), SymApp(..), Stack(..), unSB, Stack(..), ReduceSyms(..), PatMatchSyms(..), Write(..) )
   import Ra.Lang.Extra
-
+  
   import Outputable ( Outputable, interppSP, showSDocUnsafe, showPpr )
 
   module_binds :: GhcMonad m => ModSummary -> m [Bind]
   module_binds ms = (parseModule ms >>= typecheckModule) >>= (return . grhs_binds . typecheckedSource)
+  
+  constr_var_ppr :: Data d => d -> String
+  constr_var_ppr = everything_ppr ((show . toConstr) `extQ` (uncurry ((++) . (++" : ")) . (varString &&& show . varUnique)))
   
   {-
     let st0 = SB []
@@ -141,7 +144,7 @@ module Main where
       
       -- return $ show $ foldr ((:) . moduleNameString . moduleName . ms_mod) [] (mgModSummaries $ deps)
       
-      let tl_pms = pat_match tl_binds'
+      let -- tl_pms = pat_match tl_binds'
           this_binds :: [Bind]
           this_binds = filter (fromMaybe False . fmap (==(mkFastString $ "target/" ++ mod_str ++ ".hs")) . srcSpanFileName_maybe . getLoc . fst) $ tl_binds' -- [[ReduceSyms]] -- map (uncurry (++) . ((++": ") . show . getLoc &&& ppr_unsafe) . fst) $ 
       
@@ -151,7 +154,10 @@ module Main where
       -- liftIO $ putStrLn $ showPpr dflags $ everything (<>) ([] `mkQ` ((\case
           -- (OpApp _ _ (L _ (HsWrap _ _ (HsVar _ v))) _) -> [(id &&& varUnique) $ unLoc v]
       --     _ -> []) :: HsExpr GhcTc -> [(Id, Unique)])) $ tl_binds
-      return $ ppr_rs (showPpr dflags) $ mconcat $ map (mconcat . map (head . reduce . flip ReduceSyms (pms_stmts tl_pms) . pure) . snd) this_binds
+      return $ constr_var_ppr tl_binds
+      -- return $ unlines $ map (ppr_sa (showPpr dflags)) $ rs_syms $ mconcat $ map (mconcat . map (head . reduce . flip ReduceSyms mempty . pure) . snd) this_binds
+      
+      -- liftIO (trySerialize tl_pms >>= deserialize >>= return . ppr_pms ppr_unsafe)
       
       -- return $ show $ length $ rs_syms tl_rs
       
