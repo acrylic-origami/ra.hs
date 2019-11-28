@@ -1,6 +1,3 @@
-[submodule "syb-extra"]
-	path = syb-extra
-	url = https://github.com/acrylic-origami/syb-extra.git
 [submodule "purebase"]
 	path = purebase
 	url = https://github.com/acrylic-origami/purebase
