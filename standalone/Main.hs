@@ -41,7 +41,7 @@ module Main where
   import Outputable ( Outputable, interppSP, showSDocUnsafe, showPpr )
 
   module_binds :: GhcMonad m => ModSummary -> m [Bind]
-  module_binds ms = (parseModule ms >>= typecheckModule) >>= (return . grhs_binds . typecheckedSource)
+  module_binds ms = (parseModule ms >>= typecheckModule) >>= (return . (grhs_binds True) . typecheckedSource)
   
   constr_var_ppr :: Data d => d -> String
   constr_var_ppr = everything_ppr ((show . toConstr) `extQ` (uncurry ((++) . (++" : ")) . (varString &&& show . varUnique)))
@@ -148,14 +148,14 @@ module Main where
           this_binds :: [Bind]
           this_binds = filter (fromMaybe False . fmap (==(mkFastString $ "target/" ++ mod_str ++ ".hs")) . srcSpanFileName_maybe . getLoc . fst) $ tl_binds' -- [[ReduceSyms]] -- map (uncurry (++) . ((++": ") . show . getLoc &&& ppr_unsafe) . fst) $ 
       
-      -- return $ ppr_pms (showPpr dflags) tl_pms
+      -- return $ show $ length $ stbl_binds $ pms_syms tl_pms
       -- liftIO $ putStrLn $ everything_ppr ((show . toConstr) `extQ` (ppr_unsafe . (id &&& varUnique))) (tl_binds)
       -- liftIO $ putStrLn $ showPpr dflags $ everything (<>) ([] `mkQ` (pure . (id &&& varUnique))) $ tl_binds
       -- liftIO $ putStrLn $ showPpr dflags $ everything (<>) ([] `mkQ` ((\case
           -- (OpApp _ _ (L _ (HsWrap _ _ (HsVar _ v))) _) -> [(id &&& varUnique) $ unLoc v]
       --     _ -> []) :: HsExpr GhcTc -> [(Id, Unique)])) $ tl_binds
-      return $ constr_var_ppr tl_binds
-      -- return $ unlines $ map (ppr_sa (showPpr dflags)) $ rs_syms $ mconcat $ map (mconcat . map (head . reduce . flip ReduceSyms mempty . pure) . snd) this_binds
+      -- return $ constr_var_ppr tl_binds
+      return $ unlines $ map (ppr_sa (showPpr dflags)) $ rs_syms $ mconcat $ map (mconcat . map (head . reduce . flip ReduceSyms mempty . pure) . snd) this_binds
       
       -- liftIO (trySerialize tl_pms >>= deserialize >>= return . ppr_pms ppr_unsafe)
       

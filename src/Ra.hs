@@ -303,7 +303,7 @@ reduce_deep sa@(SA consumers locstack stack m_sym args thread) =
                         bind_pms = pat_match $ map (second (map (\sa' -> sa' {
                             sa_stack = sa_stack sa' ++ (next_af : stack),
                             sa_loc = sa_loc sa' ++ (next_af : locstack)
-                          }))) $ grhs_binds mg -- STACK questionable: do we need the new symbol here? Shouldn't it be  -- localize binds correctly via pushing next stack location
+                          }))) $ (grhs_binds False) mg -- STACK questionable: do we need the new symbol here? Shouldn't it be  -- localize binds correctly via pushing next stack location
                         next_frames = [BindFrame (pms_syms bind_pms), next_af]
                         next_stack = (next_frames++) stack
                         next_loc = (next_frames++) locstack
@@ -445,7 +445,7 @@ reduce_deep sa@(SA consumers locstack stack m_sym args thread) =
         let PatMatchSyms {
                 pms_syms = next_explicit_binds,
                 pms_stmts = bind_stmts
-              } = pat_match $ grhs_binds rhss
+              } = pat_match $ (grhs_binds False) rhss
             next_exprs = grhs_exprs rhss
             next_frame = AppFrame sa next_explicit_binds
         in mempty { rs_stmts = bind_stmts }

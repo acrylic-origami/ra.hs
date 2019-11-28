@@ -10,5 +10,5 @@ import Data.Generics
 import Ra.Lang ( Sym, Stack, SymTable, PatMatchSyms, Bind )
 import Ra.Extra
 
-bind_to_table :: HsBind GhcTc -> [Bind]
-grhs_binds :: GenericQ [Bind]
+bind_to_table :: Bool -> HsBind GhcTc -> [Bind]
+grhs_binds :: Bool -> GenericQ [Bind]

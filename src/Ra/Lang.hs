@@ -401,7 +401,7 @@ soft_table_lookup tbl v = listToMaybe $ elems $ filterWithKey (\q ->
     const $ uncurry (&&) $ (
         (==(varString v)) . varString -- const True
         &&& isJust . flip inst_subty (varType v) . varType
-      ) q
+      ) q -- DEBUG
   ) tbl
 
 stack_var_lookup :: Stack -> Id -> Maybe [SymApp]
