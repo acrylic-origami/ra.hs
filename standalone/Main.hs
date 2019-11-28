@@ -24,14 +24,14 @@ module Main where
   import Data.Generics ( cast, mkT, mkQ, extQ, everything, everywhere, everywhereBut, toConstr, Data(..) )
   import Data.Generics.Extra ( constr_ppr, shallowest, everything_ppr )
   import qualified Data.Map.Strict as M ( empty, elems )
-  import Control.Arrow ( first, (&&&), (***) )
+  import Control.Arrow ( first, second, (&&&), (***) )
   import Data.List ( intersperse )
   import Data.Function ( fix )
   import Data.Maybe ( fromMaybe, catMaybes, listToMaybe )
   import Control.Monad ( mzero )
   import Control.Monad.IO.Class ( liftIO )
   
-  import Ra ( pat_match, reduce_deep )
+  import Ra ( or_pat_match_many, pat_match, reduce_deep )
   import Ra.Impure ( reduce )
   import Ra.GHC.Translate ( bind_to_table, grhs_binds )
   import Ra.GHC.Util ( varString )
@@ -107,7 +107,13 @@ module Main where
     (putStrLn=<<) $ runGhc (Just libdir) $ do
       dflags <- getSessionDynFlags
       let inc_paths = includePaths dflags
-      setSessionDynFlags $ dflags { includePaths = inc_paths { includePathsGlobal = "base/C/include/":(includePathsGlobal inc_paths) }, importPaths = "target":"purebase/hiddens":"purebase/base/":"purebase/insts":(importPaths dflags) }
+      setSessionDynFlags $ dflags {
+        includePaths = inc_paths {
+          includePathsGlobal = "base/C/include/":(includePathsGlobal inc_paths)
+          },
+          importPaths = "target":"purebase/hiddens":"purebase/base/":"purebase/insts":(importPaths dflags)
+          -- packageFlags = [ExposePackage "stm" (PackageArg "") (ModRenaming True [])]
+        }
       -- importPaths = "purebase/hiddens":"purebase/base/":"purebase/insts":(importPaths dflags)
       target <- guessTarget ("target/" ++ mod_str ++ ".hs") Nothing
       setTargets [target] 
@@ -118,6 +124,11 @@ module Main where
       -- let n = fromMaybe 6 $ read <$> listToMaybe args'
       
       tl_binds <- mconcat <$> mapM module_binds (mgModSummaries deps)
+      let tl_frame = BindFrame $ SymTable {
+              stbl_table = fromMaybe mempty $ or_pat_match_many tl_binds,
+              stbl_binds = tl_binds
+            }
+          tl_binds' = map (second (map (\sa -> sa { sa_stack = tl_frame : (sa_stack sa) }))) tl_binds
       -- mapM (\mss -> do
       --     binds <- mconcat <$> mapM module_binds mss
       --     liftIO $ putStrLn $ (concat $ intersperse ", " $ map (moduleNameString . moduleName . ms_mod) mss) ++ ":" ++ (show $ M.size $ stbl_table $ pms_syms $ pat_match binds)
@@ -130,9 +141,9 @@ module Main where
       
       -- return $ show $ foldr ((:) . moduleNameString . moduleName . ms_mod) [] (mgModSummaries $ deps)
       
-      let tl_pms = pat_match tl_binds
+      let tl_pms = pat_match tl_binds'
           this_binds :: [Bind]
-          this_binds = filter (fromMaybe False . fmap (==(mkFastString $ "target/" ++ mod_str ++ ".hs")) . srcSpanFileName_maybe . getLoc . fst) $ stbl_binds $ pms_syms tl_pms -- [[ReduceSyms]] -- map (uncurry (++) . ((++": ") . show . getLoc &&& ppr_unsafe) . fst) $ 
+          this_binds = filter (fromMaybe False . fmap (==(mkFastString $ "target/" ++ mod_str ++ ".hs")) . srcSpanFileName_maybe . getLoc . fst) $ tl_binds' -- [[ReduceSyms]] -- map (uncurry (++) . ((++": ") . show . getLoc &&& ppr_unsafe) . fst) $ 
       
       -- return $ ppr_pms (showPpr dflags) tl_pms
       -- liftIO $ putStrLn $ everything_ppr ((show . toConstr) `extQ` (ppr_unsafe . (id &&& varUnique))) (tl_binds)
