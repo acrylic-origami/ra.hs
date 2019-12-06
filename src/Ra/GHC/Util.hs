@@ -58,7 +58,25 @@ import Ra.Extra ( both )
 
 unHsWrap :: LHsExpr GhcTc -> LHsExpr GhcTc
 unHsWrap expr = case unLoc expr of
-  HsWrap _ _ v -> unHsWrap (fmap (const v) expr)
+  HsWrap _ w expr' ->
+    let tymapper :: HsWrapper -> Type -> (Type, [(Type, Type)])
+        tymapper w' ty
+          | Just ty' <- strip_context ty
+          = tymapper w' ty'
+          | otherwise
+          = case w' of
+            WpTyApp ty'
+              | Just (tyvar, ty_rest) <- splitForAllTy_maybe ty
+              -> (ty_rest, [(mkTyVarTy tyvar, ty')])
+            WpCompose l r ->
+              let ((ty', rl), rr) = first (tymapper l) (tymapper r ty) -- right-left application of concrete ev vars
+              in (ty', rl <> rr)
+            _ -> (ty, [])
+        expr'' = snd ((w), unHsWrap (expr' <$ expr))
+        (_, tymap) = tymapper w $ get_expr_type expr''
+        tf :: GenericT
+        tf = mkT $ uncurry fromMaybe . (id &&& listToMaybe . map snd . flip filter tymap . (.fst) . eqType)
+    in everywhere (tf `extT` (\v -> setVarType v $ everywhere tf $ varType v)) expr'' -- leave the foralls intact: they'll be disassembled by inst_subty and other funs that touch types directly
   _ -> expr
 
 deapp :: LHsExpr GhcTc -> (LHsExpr GhcTc, [LHsExpr GhcTc])

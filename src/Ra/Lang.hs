@@ -186,10 +186,7 @@ sub_sa_types_T sa =
       type_map = fromMaybe mempty $ inst_subty sa_ty (mkFunTys (map (fromMaybe blank_type . fmap reduce_types . listToMaybe) (sa_args sa)) sa_fun_ret_ty) -- beta-reduce all types in the left-hand sides -- account for possibly missing arguments (due to anti-cycle)
       tx :: GenericT
       tx = mkT (uncurry fromMaybe . (id &&& join . fmap (type_map!?) . getTyVar_maybe))
-  in snd (sa, tx `extT` ((\expr -> case expr of -- DEBUG
-      L vloc (HsVar x (L loc v)) -> L vloc (HsVar x (L loc (setVarType v (everywhere tx $ varType v)))) -- DEBUG
-      _ -> expr
-    ) :: LHsExpr GhcTc -> LHsExpr GhcTc))
+  in snd (sa, tx `extT` (\v -> (setVarType v $ everywhere tx $ varType v)))
 
 sub_sa_types_wo_stack :: SymApp -> GenericT
 sub_sa_types_wo_stack sa = everywhereBut (False `mkQ` (const True :: Stack -> Bool)) (sub_sa_types_T sa)
@@ -363,7 +360,7 @@ soft_table_lookup :: Lookup
 soft_table_lookup tbl v = listToMaybe $ elems $ filterWithKey (\q ->
     const $ uncurry (&&) $ (
         (==(varString v)) . varString -- const True
-        &&& isJust . flip inst_subty (varType v) . varType
+        &&& isJust . inst_subty (varType v) . varType
       ) q -- DEBUG
   ) tbl
 

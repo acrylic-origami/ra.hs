@@ -299,7 +299,8 @@ reduce_deep sa@(SA consumers locstack stack m_sym args thread) =
                             stbl_table = next_arg_matches,
                             stbl_binds = next_arg_binds
                           })
-                        next_exprs = sub_sa_types_wo_stack sa $ grhs_exprs $ map (grhssGRHSs . m_grhss . unLoc) $ unLoc $ mg_alts mg
+                        next_exprs = everywhereBut (False `mkQ` (const True :: Stack -> Bool)) (sub_sa_types_T sa `extT` (\v -> setVarType v $ sub_sa_types_T sa $ varType v)) -- TEMP ugliness for the Var exception
+                          $ grhs_exprs $ map (grhssGRHSs . m_grhss . unLoc) $ unLoc $ mg_alts mg -- TEMP
                         bind_pms = pat_match $ map (second (map (\sa' -> sa' {
                             sa_stack = sa_stack sa' ++ (next_af : stack),
                             sa_loc = sa_loc sa' ++ (next_af : locstack)
@@ -432,7 +433,7 @@ reduce_deep sa@(SA consumers locstack stack m_sym args thread) =
       -----------------------
       
       OpApp _ l_l l_op l_r -> unravel1 l_op [[l_l], [l_r]]
-      HsWrap _ _ v -> unravel1 (v <$ sym) [] -- why is HsWrap wrapping a bare HsExpr?! No loc? Inferred from surroundings I guess (like this)
+      HsWrap _ _ _ -> unravel1 (unHsWrap sym) []
       ExprWithTySig _ v -> unravel1 v []
       HsAppType _ v -> unravel1 v []
       NegApp _ v _ -> unravel1 v []

@@ -1,17 +1,21 @@
-{-# LANGUAGE LambdaCase, NamedFieldPuns #-}
+{-# LANGUAGE LambdaCase, NamedFieldPuns, TupleSections #-}
 module Main where
   import System.Environment ( getArgs )
   -- import System.Console.GetOpt ( getOpt )
   
   import DynFlags
   import GHC
+  import TcEvidence ( HsWrapper(..), EvTerm(..) )
+  import TcRnTypes
+  import HscTypes ( ModGuts(..) )
+  import Coercion ( coercionType )
   import SrcLoc ( srcSpanFileName_maybe )
   import FastString ( mkFastString )
   import Digraph ( flattenSCC )
   import Class ( Class(..) )
   import GHC.Paths ( libdir )
   import Var ( Var, varUnique, varType )
-  import Type ( getTyVar_maybe, tyConAppTyCon_maybe )
+  import Type -- ( getTyVar_maybe, tyConAppTyCon_maybe )
   import TyCon ( tyConName, tyConTyVars, tyConStupidTheta, tyConName )
   import ConLike ( ConLike(..) )
   import DataCon ( dataConName, DataCon )
@@ -21,7 +25,7 @@ module Main where
   import Bag ( bagToList )
   import qualified Data.Map.Strict as M
   import Data.Map.Strict ( Map(..), unionsWith, keys, toList, insert, insertWith )
-  import Data.Generics ( cast, mkT, mkQ, extQ, everything, everywhere, everywhereBut, toConstr, Data(..) )
+  import Data.Generics ( cast, mkT, mkQ, extQ, everything, everythingBut, everywhere, everywhereBut, toConstr, Data(..) )
   import Data.Generics.Extra ( constr_ppr, shallowest, everything_ppr )
   import qualified Data.Map.Strict as M ( empty, elems )
   import Control.Arrow ( first, second, (&&&), (***) )
@@ -41,10 +45,13 @@ module Main where
   import Outputable ( Outputable, interppSP, showSDocUnsafe, showPpr )
 
   module_binds :: GhcMonad m => ModSummary -> m [Bind]
-  module_binds ms = (parseModule ms >>= typecheckModule) >>= (return . (grhs_binds True) . typecheckedSource)
+  module_binds = fmap ((grhs_binds True) . typecheckedSource) . module_tcs
+  
+  module_tcs :: GhcMonad m => ModSummary -> m TypecheckedModule
+  module_tcs = (typecheckModule=<<) . parseModule
   
   constr_var_ppr :: Data d => d -> String
-  constr_var_ppr = everything_ppr ((show . toConstr) `extQ` (uncurry ((++) . (++" : ")) . (varString &&& show . varUnique)))
+  constr_var_ppr = everything_ppr ((show . toConstr) `extQ` (uncurry ((++) . (uncurry ((++) . (++" : ")))) . ((varString &&& show . varUnique) &&& const "" . constr_var_ppr . varType)))
   
   {-
     let st0 = SB []
@@ -126,7 +133,10 @@ module Main where
       
       -- let n = fromMaybe 6 $ read <$> listToMaybe args'
       
+      return $ show $ map (moduleNameString . moduleName . ms_mod) (mgModSummaries deps)
+      
       tl_binds <- mconcat <$> mapM module_binds (mgModSummaries deps)
+      
       let tl_frame = BindFrame $ SymTable {
               stbl_table = fromMaybe mempty $ or_pat_match_many tl_binds,
               stbl_binds = tl_binds
@@ -146,7 +156,24 @@ module Main where
       
       let -- tl_pms = pat_match tl_binds'
           this_binds :: [Bind]
-          this_binds = filter (fromMaybe False . fmap (==(mkFastString $ "target/" ++ mod_str ++ ".hs")) . srcSpanFileName_maybe . getLoc . fst) $ tl_binds' -- [[ReduceSyms]] -- map (uncurry (++) . ((++": ") . show . getLoc &&& ppr_unsafe) . fst) $ 
+          this_binds = filter (fromMaybe False . fmap (==(mkFastString $ "target/" ++ mod_str ++ ".hs")) . srcSpanFileName_maybe . getLoc . fst) $ tl_binds' -- [[ReduceSyms]] -- map (uncurry (++) . ((++": ") . show . getLoc &&& ppr_unsafe) . fst) $
+      
+      {- (unlines . everything (++) z([] `mkQ` (\case
+          WpTyApp a -> [showPpr dflags a]
+          _ -> []
+        )) . -}
+      -- (constr_var_ppr . map typecheckedSource) <$> mapM module_tcs (mgModSummaries deps)
+      -- (unlines . everything (<>) ([] `mkQ` (\case
+      --     -- HsWrap _ _ exprs -> fromMaybe [] $ shallowest (Nothing `mkQ` (Just . (show . toConstr :: HsExpr GhcTc -> String))) exprs
+      --     WpLet t -> [showPpr dflags t]
+      --     _ -> []
+      --   )) . map typecheckedSource) <$> mapM module_tcs (mgModSummaries deps)
+      -- (unlines . map (constr_var_ppr . mg_binds . dm_core_module)) <$> mapM ((>>=desugarModule) . module_tcs) (mgModSummaries deps)
+      {- \case
+          HsWrap _ _ exprs -> fromMaybe [] $ shallowest (Nothing `mkQ` (Just . (show . toConstr :: HsExpr GhcTc -> String))) exprs
+          _ -> []
+         -}
+      -- return $ unlines $ everything (<>) ([] `mkQ` (pure . show . (varUnique &&& varString &&& showPpr dflags . varType &&& everything (<>) ([] `mkQ` (pure . (varUnique &&& showPpr dflags))) . varType))) tl_binds
       
       -- return $ show $ length $ stbl_binds $ pms_syms tl_pms
       -- liftIO $ putStrLn $ everything_ppr ((show . toConstr) `extQ` (ppr_unsafe . (id &&& varUnique))) (tl_binds)
@@ -154,7 +181,7 @@ module Main where
       -- liftIO $ putStrLn $ showPpr dflags $ everything (<>) ([] `mkQ` ((\case
           -- (OpApp _ _ (L _ (HsWrap _ _ (HsVar _ v))) _) -> [(id &&& varUnique) $ unLoc v]
       --     _ -> []) :: HsExpr GhcTc -> [(Id, Unique)])) $ tl_binds
-      -- return $ constr_var_ppr tl_binds
+      -- (constr_var_ppr . map typecheckedSource) <$> mapM module_tcs (mgModSummaries deps)
       return $ unlines $ map (ppr_sa (showPpr dflags)) $ rs_syms $ mconcat $ map (mconcat . map (head . reduce . flip ReduceSyms mempty . pure) . snd) this_binds
       
       -- liftIO (trySerialize tl_pms >>= deserialize >>= return . ppr_pms ppr_unsafe)
