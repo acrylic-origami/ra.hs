@@ -14,6 +14,8 @@ module Ra.GHC.Util (
   blank_id,
   get_mg_type,
   get_expr_type,
+  strip_context,
+  splitFunTysLossy,
   inst_subty
 ) where
 
@@ -23,9 +25,9 @@ import TcEvidence ( HsWrapper(..) )
 import ConLike ( ConLike(..) )
 import DataCon ( DataCon(..), dataConRepType )
 import qualified TyCon as GHCTyCon ( tyConName, tyConSingleDataCon_maybe )
-import Type ( tyConAppTyConPicky_maybe, dropForAlls, splitFunTys, splitAppTys, splitTyConApp_maybe, isTyVarTy, getTyVar_maybe, tyConAppTyCon_maybe )
+import Type ( tyConAppTyConPicky_maybe, dropForAlls, splitFunTys, splitAppTys, mkAppTys, mkFunTy, splitTyConApp_maybe, isTyVarTy, mkTyVarTy, getTyVar_maybe, tyConAppTyCon_maybe, splitForAllTy_maybe, eqType )
 import DataCon ( dataConUserTyVarBinders )
-import Var ( varName, varType )
+import Var ( varName, varType, setVarType )
 import Name ( mkSystemName, nameOccName )
 import OccName ( mkVarOcc, occNameString )
 import Bag
@@ -40,7 +42,7 @@ import Var ( mkLocalVar )
 import IdInfo ( vanillaIdInfo, IdDetails(VanillaId) )
 
 import Data.Foldable ( foldrM )
-import Data.Generics ( Data(..), everythingBut, GenericQ, cast, mkQ, extQ, gmapQ )
+import Data.Generics ( Data(..), everywhere, mkT, extT, GenericT, everythingBut, GenericQ, cast, mkQ, extQ, gmapQ )
 import Data.Generics.Extra ( shallowest, constr_ppr )
 import Data.Bool ( bool )
 import Control.Arrow ( first, second, (&&&), (***) )
@@ -144,14 +146,7 @@ splitFunTysLossy z = splitFunTys (fromMaybe z (strip_context z))
 
 inst_subty :: Type -> Type -> Maybe (Map Id Type)
 inst_subty a b =
-  let (a', b') = both dropForAlls (a, b)
-      ((fun_tys_a, ret_a), (fun_tys_b, ret_b)) = both strip (a', b') where
-        strip z =
-          let full@(ctx_fun_tys, rhs) = splitFunTys $ dropForAlls z
-              fun_tys = dropWhile (isJust . join . fmap (listToMaybe . dataConUserTyVarBinders) . (GHCTyCon.tyConSingleDataCon_maybe=<<) . tyConAppTyCon_maybe) ctx_fun_tys
-          in if null ctx_fun_tys
-            then full -- drop forall
-            else first (fun_tys++) $ strip rhs
+  let ((fun_tys_a, a'), (fun_tys_b, b')) = both (splitFunTysLossy . (mkT dropForAlls)) (a, b)
       ((app_con_a, app_tys_a), (app_con_b, app_tys_b)) = both splitAppTys (a', b') -- NOTE also splits funtys annoyingly
       ((m_tycon_a, m_tycon_tys_a), (m_tycon_b, m_tycon_tys_b)) = both ((fmap fst &&& fmap snd) . splitTyConApp_maybe) (a', b')
       
@@ -159,17 +154,17 @@ inst_subty a b =
   in if (isJust m_tycon_a)
       && fromMaybe True (liftA2 (/=) m_tycon_a m_tycon_b)
     then Nothing -- `a` is more concrete than `b` or their tycons are incompatible
-    else fst (mempty, (a, b, a', b', app_con_a, app_con_b, fun_tys_a, fun_tys_b, ret_a, ret_b, (m_tycon_a, m_tycon_tys_a), (m_tycon_b, m_tycon_tys_b))) <> ( -- DEBUG
-        if | Just avar <- getTyVar_maybe a' ->
-            if not $ isTyVarTy b'
-              then Just (singleton avar b') -- beta-reduction
-              else Just mempty
-           | not $ null fun_tys_a -> -- function type matching
+    else fst (mempty, (a, b, a', b', app_con_a, app_con_b, fun_tys_a, fun_tys_b, (m_tycon_a, m_tycon_tys_a), (m_tycon_b, m_tycon_tys_b))) <> ( -- DEBUG
+        if | not $ null fun_tys_a -> -- function type matching
             if length fun_tys_a /= length fun_tys_b
               then Nothing
               else
-                union <$> inst_subty ret_a ret_b
+                union <$> inst_subty a' b'
                 <*> masum (zip fun_tys_a fun_tys_b)
+           | Just avar <- getTyVar_maybe a' ->
+            if not $ isTyVarTy b'
+              then Just (singleton avar b') -- beta-reduction
+              else Just mempty
            | otherwise ->
             liftA2 union
               (fromMaybe (Just mempty) (

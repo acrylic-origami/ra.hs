@@ -179,7 +179,7 @@ sub_sa_types_T sa =
   let sa_ty = get_sa_type sa
       sa_fun_ret_ty = dig_ret_ty sa_ty where
         dig_ret_ty ty =
-          let (arg_tys, rhs) = splitFunTys $ dropForAlls ty
+          let (arg_tys, rhs) = splitFunTysLossy ty
           in if null $ arg_tys
             then rhs -- drop forall
             else dig_ret_ty rhs
@@ -195,7 +195,7 @@ sub_sa_types_wo_stack :: SymApp -> GenericT
 sub_sa_types_wo_stack sa = everywhereBut (False `mkQ` (const True :: Stack -> Bool)) (sub_sa_types_T sa)
   
 reduce_types :: SymApp -> Type
-reduce_types sa = uncurry mkFunTys $ everywhere (sub_sa_types_T sa) $ first (drop (length $ sa_args sa)) $ splitFunTys $ dropForAlls $ get_sa_type sa
+reduce_types sa = uncurry mkFunTys $ everywhere (sub_sa_types_T sa) $ first (drop (length $ sa_args sa)) $ splitFunTysLossy $ get_sa_type sa
   
 -- instance Eq SymApp where
 --   (==) = curry $ flip all preds . flip ($) where
