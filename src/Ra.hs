@@ -353,62 +353,75 @@ reduce_deep sa@(SA consumers locstack stack m_sym args thread) =
               -------------------------------------
               -- +++ IO-like monad behaviors +++ --
               -------------------------------------
-              if | varString v `elem` [
-                    "return",
-                    "returnSTM",
-                    "unSTM",
-                    "unsafeIOToSTM",
-                    "atomically",
-                    "stToIO"
-                  ]
-                 , vs:args'' <- args'
-                 -> mconcat $ map (\sa' -> reduce_deep $ sa' { sa_args = ((sa_args sa') <> args'') }) vs
-                 
-                 | varString v `elem` [
-                    ">>",
-                    "thenSTM"
-                  ]
-                 , i:o:[] <- args'
-                 , let reduce' = map ((\rs -> rs { rs_syms = map (\sa' -> sa' { sa_loc = StmtFrame : sa_loc sa }) (rs_syms rs) }) . reduce_deep) -- post-reduction tack StmtFrame
-                       i' = reduce' i
-                       o' = reduce' o
-                       next_rs = mconcat [i'' { rs_syms = mempty } <> o'' | i'' <- i', o'' <- o']-- combinatorial EXPLOSION! BOOM PEW PEW -- magical monad `*>` == `>>`: take right-hand syms, merge writes
-                 -> next_rs {
-                     rs_stmts = rs_stmts next_rs <> rs_syms next_rs <> rs_syms (mconcat i')
-                  }
-                    
-                 | varString v `elem` [
-                    ">>=",
-                    "bindSTM"
-                  ]
-                 , i:o:[] <- args'
-                 ->
-                  let next_rs = mconcat $ map (\fun -> reduce_deep fun {
-                          sa_args = sa_args fun ++ [i]
-                        }) o
-                      next_syms = map (\sa -> sa { sa_loc = StmtFrame : sa_loc sa }) (rs_syms next_rs)
-                  in next_rs {
-                    rs_syms = next_syms,
-                    rs_stmts = rs_stmts next_rs <> next_syms <> i -- TODO including both inputs and outputs in the worst-case will duplicate most statements (e.g. if it's a long chain of `>>` and `>>=`), which ends up polluting the top-level, maybe with an exponential number of terms. However, the base case is non-trivial because if it's just this statement alone, we would need to log both as statements for proper coverage.
-                  }
-                  -- magical monad `>>=`: shove the return value from the last stage into the next, merge writes
-                  -- grabbing the writes is as easy as just adding `i` to the arguments; the argument resolution in `terminal` will take care of it
-                  -- under the assumption that it's valid to assume IO is a pure wrapper, this actually just reduces to plain application of a lambda
-                
-                 | varString v == "forkIO"
-                 , to_fork:[] <- args'
-                 ->
-                  let result = mconcat $ map (everywhereBut (False `mkQ` (const True :: Stack -> Bool)) (mkT $ \sa' -> sa' { sa_thread = Just sa }) . reduce_deep) to_fork
-                  in result {
-                      rs_syms = [error "Using the ThreadID from forkIO is not yet supported."]
+              let _ap f v =
+                    let next_rs = mconcat $ map (\fun -> reduce_deep fun {
+                            sa_args = sa_args fun ++ [v]
+                          }) f
+                        next_syms = map (\sa -> sa { sa_loc = StmtFrame : sa_loc sa }) (rs_syms next_rs)
+                    in next_rs {
+                      rs_syms = next_syms,
+                      rs_stmts = rs_stmts next_rs <> next_syms <> v -- TODO including both inputs and outputs in the worst-case will duplicate most statements (e.g. if it's a long chain of `>>` and `>>=`), which ends up polluting the top-level, maybe with an exponential number of terms. However, the base case is non-trivial because if it's just this statement alone, we would need to log both as statements for proper coverage.
                     }
+                  
+              in if | varString v `elem` [
+                       "returnIO",
+                       "returnSTM",
+                       "unSTM",
+                       "unsafeIOToSTM",
+                       "atomically",
+                       "stToIO"
+                     ]
+                    , vs:args'' <- args'
+                    -> mconcat $ map (\sa' -> reduce_deep $ sa' { sa_args = ((sa_args sa') <> args'') }) vs
                     
-                 | varString v `elem` [
-                    "retry",
-                    "throwSTM"
-                  ] -> mempty
-                
-                 | otherwise -> terminal'
+                    | varString v `elem` [
+                       -- ">>",
+                       "thenIO",
+                       "thenSTM"
+                     ]
+                    , i:o:[] <- args'
+                    , let reduce' = map ((\rs -> rs { rs_syms = map (\sa' -> sa' { sa_loc = StmtFrame : sa_loc sa }) (rs_syms rs) }) . reduce_deep) -- post-reduction tack StmtFrame
+                          i' = reduce' i
+                          o' = reduce' o
+                          next_rs = mconcat [i'' { rs_syms = mempty } <> o'' | i'' <- i', o'' <- o']-- combinatorial EXPLOSION! BOOM PEW PEW -- magical monad `*>` == `>>`: take right-hand syms, merge writes
+                    -> next_rs {
+                        rs_stmts = rs_stmts next_rs <> rs_syms next_rs <> rs_syms (mconcat i')
+                     }
+                       
+                    | varString v `elem` [
+                       -- ">>=",
+                       "bindSTM",
+                       "bindIO"
+                     ]
+                    , v:f:[] <- args'
+                    -> _ap f v
+                     -- magical monad `>>=`: shove the return value from the last stage into the next, merge writes
+                     -- grabbing the writes is as easy as just adding `i` to the arguments; the argument resolution in `terminal` will take care of it
+                     -- under the assumption that it's valid to assume IO is a pure wrapper, this actually just reduces to plain application of a lambda
+                    
+                    | varString v `elem` [
+                        -- "<*>",
+                        "ap",
+                        "<$>"
+                        -- "fmap" -- TEMP
+                      ]
+                    , f:v:[] <- args'
+                    -> _ap f v
+                   
+                    | varString v == "forkIO"
+                    , to_fork:[] <- args'
+                    ->
+                     let result = mconcat $ map (everywhereBut (False `mkQ` (const True :: Stack -> Bool)) (mkT $ \sa' -> sa' { sa_thread = Just sa }) . reduce_deep) to_fork
+                     in result {
+                         rs_syms = [error "Using the ThreadID from forkIO is not yet supported."]
+                       }
+                       
+                    | varString v `elem` [
+                       "retry",
+                       "throwSTM"
+                     ] -> mempty
+                   
+                    | otherwise -> terminal'
         
       HsApp _ _ _ -> -- this should only come up from the GHC AST, not from our own reduce-unwrap-wrap
         let (fun, next_args) = deapp sym
