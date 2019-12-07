@@ -10,8 +10,8 @@ module Ra.GHC.Util (
   varString,
   varTyConName,
   blank_name,
-  blank_type,
-  blank_id,
+  -- blank_type,
+  -- blank_id,
   get_mg_type,
   get_expr_type,
   strip_context,
@@ -106,8 +106,8 @@ varString = occNameString . nameOccName . varName
 varTyConName = fmap (occNameString . nameOccName . GHCTyCon.tyConName) . tyConAppTyConPicky_maybe . snd . splitForAllTys . varType
 
 blank_name = mkSystemName (mkVarOccUnique $ mkFastString "") (mkVarOcc "")
-blank_type = mkTyVarTy blank_id
-blank_id = mkLocalVar VanillaId blank_name blank_type vanillaIdInfo
+-- blank_type = mkTyVarTy blank_id
+-- blank_id = mkLocalVar VanillaId blank_name blank_type vanillaIdInfo
 
 get_mg_type :: MatchGroup GhcTc (LHsExpr GhcTc) -> Type
 get_mg_type mg = uncurry mkFunTys $ (mg_arg_tys &&& mg_res_ty) $ mg_ext mg -- questioning why they didn't just give us a FunTy...
@@ -119,8 +119,8 @@ get_expr_type expr = case unLoc expr of
   HsLam _ mg -> get_mg_type mg
   HsVar _ (L _ v) -> varType v
   HsOverLit _ (OverLit { ol_ext = OverLitTc { ol_type } }) -> ol_type
-  HsOverLit _ (XOverLit _ ) -> blank_type
-  HsLit _ _ -> blank_type
+  HsOverLit _ (XOverLit _ ) -> error "Type unextractable from XOverLit"
+  HsLit _ _ -> error "Type unextractable from HsLit "
   ExplicitTuple _ args _ -> mkAppTys (error "Report this bug: too lazy to make actual Tuple TyCon.") (map (\case
         L _ (Present _ expr) -> get_expr_type expr
         _ -> error "Tuple sections not yet supported"
