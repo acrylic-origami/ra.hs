@@ -127,7 +127,7 @@ get_expr_type expr = case unLoc expr of
   HsOverLit _ (XOverLit _ ) -> error "Type unextractable from XOverLit"
   HsLit _ _ -> error "Type unextractable from HsLit "
   ExplicitTuple _ args _ -> mkAppTys (error "Report this bug: too lazy to make actual Tuple TyCon.") (map (\case
-        L _ (Present _ expr) -> get_expr_type expr
+        L _ (Present _ expr') -> get_expr_type expr'
         _ -> error "Tuple sections not yet supported"
       ) args)
   ExplicitList ty _ _ -> ty
