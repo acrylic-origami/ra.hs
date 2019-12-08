@@ -25,7 +25,7 @@ import TcEvidence ( HsWrapper(..) )
 import ConLike ( ConLike(..) )
 import DataCon ( DataCon(..), dataConRepType )
 import qualified TyCon as GHCTyCon ( tyConName, tyConSingleDataCon_maybe )
-import Type ( tyConAppTyConPicky_maybe, dropForAlls, splitFunTys, splitAppTys, mkAppTys, mkFunTy, splitTyConApp_maybe, isTyVarTy, mkTyVarTy, getTyVar_maybe, tyConAppTyCon_maybe, splitForAllTy_maybe, eqType )
+import Type ( tyConAppTyConPicky_maybe, dropForAlls, splitFunTys, splitFunTy_maybe, mkInvForAllTy, splitAppTys, splitAppTy_maybe, mkAppTys, mkFunTy, splitTyConApp_maybe, isTyVarTy, mkTyVarTy, getTyVar_maybe, tyConAppTyCon_maybe, splitForAllTy_maybe, eqType )
 import DataCon ( dataConUserTyVarBinders )
 import Var ( varName, varType, setVarType )
 import Name ( mkSystemName, nameOccName )
@@ -33,6 +33,7 @@ import OccName ( mkVarOcc, occNameString )
 import Bag
 
 -- for blank_id
+import Data.List ( elemIndex )
 import Type ( mkTyVarTy, mkFunTys )
 import Name ( mkSystemName )
 import OccName ( mkVarOcc )
@@ -159,7 +160,7 @@ get_expr_type expr = case unLoc expr of
 strip_context :: Type -> Maybe Type
 strip_context ty =
   let (args, ret) = splitFunTys ty
-      n_ctx = takeWhile (isJust . join . fmap (listToMaybe . dataConUserTyVarBinders) . (GHCTyCon.tyConSingleDataCon_maybe=<<) . tyConAppTyCon_maybe) args
+      n_ctx = takeWhile (fromMaybe False . fmap isClassTyCon . tyConAppTyCon_maybe) args
   in if length n_ctx > 0
     then Just $ mkFunTys (drop (length n_ctx) args) ret
     else Nothing

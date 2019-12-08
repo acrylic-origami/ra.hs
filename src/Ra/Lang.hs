@@ -70,7 +70,7 @@ import Data.Set ( Set(..) )
 import Data.Semigroup ( Semigroup(..), (<>) )
 import Data.Monoid ( Monoid(..), mempty, mconcat )
 import Data.Maybe ( listToMaybe, catMaybes, isJust, fromMaybe )
-import Control.Applicative ( (<|>) )
+import Control.Applicative ( (<|>), liftA2 )
 import Control.Exception ( assert )
 
 import Ra.Extra ( update_head, zipAll, both )
