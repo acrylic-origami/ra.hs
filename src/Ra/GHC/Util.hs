@@ -45,6 +45,7 @@ import Data.Foldable ( foldrM )
 import Data.Generics ( Data(..), everywhere, mkT, extT, GenericT, everythingBut, GenericQ, cast, mkQ, extQ, gmapQ )
 import Data.Generics.Extra ( shallowest, constr_ppr )
 import Data.Bool ( bool )
+import qualified Data.Map.Strict as M
 import Control.Arrow ( first, second, (&&&), (***) )
 import Data.Maybe ( catMaybes, fromMaybe, isJust, listToMaybe )
 import Control.Monad ( join )
@@ -59,7 +60,7 @@ import Ra.Extra ( both )
 unHsWrap :: LHsExpr GhcTc -> LHsExpr GhcTc
 unHsWrap expr = case unLoc expr of
   HsWrap _ w expr' ->
-    let tymapper :: HsWrapper -> Type -> (Type, [(Type, Type)])
+    let tymapper :: HsWrapper -> Type -> (Type, [(Id, Type)])
         tymapper w' ty
           | Just ty' <- strip_context ty
           = tymapper w' ty'
@@ -67,15 +68,19 @@ unHsWrap expr = case unLoc expr of
           = case w' of
             WpTyApp ty'
               | Just (tyvar, ty_rest) <- splitForAllTy_maybe ty
-              -> (ty_rest, [(mkTyVarTy tyvar, ty')])
+              -> (ty_rest, [(tyvar, ty')])
             WpCompose l r ->
               let ((ty', rl), rr) = first (tymapper l) (tymapper r ty) -- right-left application of concrete ev vars
               in (ty', rl <> rr)
             _ -> (ty, [])
         expr'' = snd ((w), unHsWrap (expr' <$ expr))
-        (_, tymap) = tymapper w $ get_expr_type expr''
+        tymap = M.fromList $ snd $ tymapper w $ get_expr_type expr''
         tf :: GenericT
-        tf = mkT $ uncurry fromMaybe . (id &&& listToMaybe . map snd . flip filter tymap . (.fst) . eqType)
+        tf = mkT (\t ->
+            case getTyVar_maybe t of
+              Just v | Just t' <- v `M.lookup` tymap -> t'
+              _ -> t
+          )
     in everywhere (tf `extT` (\v -> setVarType v $ everywhere tf $ varType v)) expr'' -- leave the foralls intact: they'll be disassembled by inst_subty and other funs that touch types directly
   _ -> expr
 
