@@ -19,7 +19,7 @@ bind_to_table :: Bool -> LHsBind GhcTc -> [Bind]
 bind_to_table with_abs_exports (L loc b) = case b of
   AbsBinds { abs_exports, abs_binds } ->
     let subbinds = mconcat $ bagToList $ mapBag (bind_to_table with_abs_exports) abs_binds -- consider making union_sym_table just Foldable t => ...
-    in if length subbinds > 0 && not with_abs_exports
+    in if length subbinds > 0 && with_abs_exports
       then subbinds <> map (L loc . VarPat NoExt . noLoc . abe_poly &&& pure . sa_from_sym . Sym . L loc . HsVar NoExt . noLoc . abe_mono) abs_exports
       else subbinds
     

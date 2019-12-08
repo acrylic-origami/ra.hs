@@ -45,7 +45,7 @@ module Main where
   import Outputable ( Outputable, interppSP, showSDocUnsafe, showPpr )
 
   module_binds :: GhcMonad m => ModSummary -> m [Bind]
-  module_binds = fmap ((grhs_binds True) . typecheckedSource) . module_tcs
+  module_binds = fmap ((grhs_binds False) . typecheckedSource) . module_tcs
   
   module_tcs :: GhcMonad m => ModSummary -> m TypecheckedModule
   module_tcs = (typecheckModule=<<) . parseModule
