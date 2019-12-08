@@ -262,7 +262,6 @@ is_visited sb sa = any (\case
     _ -> False
   ) sb
 
-
 -- instance Semigroup Stack where
 --   (<>) =
 --     let combine (Just a) (Just b) = assert (af_raw a == af_raw b) (a {

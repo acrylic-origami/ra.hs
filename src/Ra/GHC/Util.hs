@@ -136,18 +136,13 @@ get_expr_type expr = case unLoc expr of
   
   -- NON-TERMINAL SYMBOLS
   -- NOTE: none of these should actually ever be called, because we should always have normal forms at instance resolution
-  HsApp _ l _ -> uncurry mkFunTys $ first tail $ splitFunTysLossy $ get_expr_type l
-  OpApp _ _ op _ -> uncurry mkFunTys $ first (tail . tail) $ splitFunTysLossy $ get_expr_type op
+  HsApp _ l _ -> drop_ty_args [0] $ strip_contexts_deep $ get_expr_type l
+  OpApp _ _ op _ -> drop_ty_args [0, 1] $ strip_contexts_deep $ get_expr_type op
   HsWrap _ _ expr' -> get_expr_type $ expr' <$ expr
   NegApp _ expr' _ -> get_expr_type expr'
   HsPar _ expr' -> get_expr_type expr'
-  SectionL _ _ op -> uncurry mkFunTys $ first tail $ splitFunTysLossy $ get_expr_type op
-  SectionR _ op _ ->
-    let op_ty = get_expr_type op
-        (arg_tys, res_ty) = splitFunTysLossy op_ty
-    in if length arg_tys > 0
-      then mkFunTys (uncurry (:) $ (head &&& tail . tail) arg_tys) res_ty
-      else undefined -- error $ (ppr_unsafe op_ty ++ "\n---\n" ++ constr_ppr op_ty)
+  SectionL _ _ op -> drop_ty_args [0] $ strip_contexts_deep $ get_expr_type op
+  SectionR _ op _ -> drop_ty_args [1] $ strip_contexts_deep $ get_expr_type op
   HsCase _ _ mg -> get_mg_type mg
   HsIf _ _ _ a _b -> get_expr_type a -- assume a ~ _b
   HsMultiIf ty _ -> ty
