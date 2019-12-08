@@ -25,7 +25,7 @@ import TcEvidence ( HsWrapper(..) )
 import ConLike ( ConLike(..) )
 import DataCon ( DataCon(..), dataConRepType )
 import qualified TyCon as GHCTyCon ( tyConName, tyConSingleDataCon_maybe )
-import Type ( tyConAppTyConPicky_maybe, dropForAlls, splitFunTys, splitAppTys, mkAppTys, mkFunTy, splitTyConApp_maybe, isTyVarTy, mkTyVarTy, getTyVar_maybe, tyConAppTyCon_maybe, splitForAllTy_maybe, eqType )
+import Type ( tyConAppTyConPicky_maybe, dropForAlls, splitFunTys, splitFunTy_maybe, mkInvForAllTy, splitAppTys, splitAppTy_maybe, mkAppTys, mkFunTy, splitTyConApp_maybe, isTyVarTy, mkTyVarTy, getTyVar_maybe, tyConAppTyCon_maybe, splitForAllTy_maybe, eqType )
 import DataCon ( dataConUserTyVarBinders )
 import Var ( varName, varType, setVarType )
 import Name ( mkSystemName, nameOccName )
@@ -33,6 +33,7 @@ import OccName ( mkVarOcc, occNameString )
 import Bag
 
 -- for blank_id
+import Data.List ( elemIndex )
 import Type ( mkTyVarTy, mkFunTys )
 import Name ( mkSystemName )
 import OccName ( mkVarOcc )
@@ -135,18 +136,13 @@ get_expr_type expr = case unLoc expr of
   
   -- NON-TERMINAL SYMBOLS
   -- NOTE: none of these should actually ever be called, because we should always have normal forms at instance resolution
-  HsApp _ l _ -> uncurry mkFunTys $ first tail $ splitFunTysLossy $ get_expr_type l
-  OpApp _ _ op _ -> uncurry mkFunTys $ first (tail . tail) $ splitFunTysLossy $ get_expr_type op
+  HsApp _ l _ -> drop_ty_args [0] $ strip_contexts_deep $ get_expr_type l
+  OpApp _ _ op _ -> drop_ty_args [0, 1] $ strip_contexts_deep $ get_expr_type op
   HsWrap _ _ expr' -> get_expr_type $ expr' <$ expr
   NegApp _ expr' _ -> get_expr_type expr'
   HsPar _ expr' -> get_expr_type expr'
-  SectionL _ _ op -> uncurry mkFunTys $ first tail $ splitFunTysLossy $ get_expr_type op
-  SectionR _ op _ ->
-    let op_ty = get_expr_type op
-        (arg_tys, res_ty) = splitFunTysLossy op_ty
-    in if length arg_tys > 0
-      then mkFunTys (uncurry (:) $ (head &&& tail . tail) arg_tys) res_ty
-      else undefined -- error $ (ppr_unsafe op_ty ++ "\n---\n" ++ constr_ppr op_ty)
+  SectionL _ _ op -> drop_ty_args [0] $ strip_contexts_deep $ get_expr_type op
+  SectionR _ op _ -> drop_ty_args [1] $ strip_contexts_deep $ get_expr_type op
   HsCase _ _ mg -> get_mg_type mg
   HsIf _ _ _ a _b -> get_expr_type a -- assume a ~ _b
   HsMultiIf ty _ -> ty
@@ -159,42 +155,57 @@ get_expr_type expr = case unLoc expr of
 strip_context :: Type -> Maybe Type
 strip_context ty =
   let (args, ret) = splitFunTys ty
-      n_ctx = takeWhile (isJust . join . fmap (listToMaybe . dataConUserTyVarBinders) . (GHCTyCon.tyConSingleDataCon_maybe=<<) . tyConAppTyCon_maybe) args
+      n_ctx = takeWhile (fromMaybe False . fmap isClassTyCon . tyConAppTyCon_maybe) args
   in if length n_ctx > 0
     then Just $ mkFunTys (drop (length n_ctx) args) ret
     else Nothing
 
+strip_contexts_deep :: GenericT
+strip_contexts_deep = everywhere (mkT $ \z -> fromMaybe z (strip_context z))
+
 splitFunTysLossy :: Type -> ([Type], Type)
-splitFunTysLossy z = splitFunTys (fromMaybe z (strip_context z))
+splitFunTysLossy z = splitFunTys strip_contexts_deep
+
+drop_ty_args :: [Int] -> Type -> Type
+drop_ty_args = drop_ty_args' 0 where
+  drop_ty_args' n idxs ty
+    | null idxs = ty
+    | Just (bndr, ty') <- splitForAllTy_maybe ty
+    = mkInvForAllTy bndr (drop_ty_args' n idxs ty')
+    | Just (arg_ty, ty') <- splitFunTy_maybe ty
+    = case elemIndex n idxs of
+      Just idx -> drop_ty_args' (n + 1) (take idx idxs ++ drop (idx + 1) idxs) ty'
+      Nothing -> mkFunTy arg_ty (drop_ty_args' (n + 1) idxs ty')
+    | otherwise = error "Not enough args to pop"
 
 inst_subty :: Type -> Type -> Maybe (Map Id Type)
 inst_subty a b =
-  let ((fun_tys_a, a'), (fun_tys_b, b')) = both (splitFunTysLossy . (mkT dropForAlls)) (a, b)
-      ((app_con_a, app_tys_a), (app_con_b, app_tys_b)) = both splitAppTys (a', b') -- NOTE also splits funtys annoyingly
-      ((m_tycon_a, m_tycon_tys_a), (m_tycon_b, m_tycon_tys_b)) = both ((fmap fst &&& fmap snd) . splitTyConApp_maybe) (a', b')
+  let ((fun_tys_a, a'), (fun_tys_b, b')) = both (splitFunTysLossy . everywhere (mkT dropForAlls)) (a, b)
+      ((m_app_con_a, m_app_tys_a), (m_app_con_b, m_app_tys_b)) = both (\ty ->
+          let (m_con, m_tys) = (fmap fst &&& fmap snd) $ splitAppTy_maybe ty
+              m_con_tys' = splitAppTys <$> m_con
+          in (fst <$> m_con_tys', liftA2 ((.pure) . (<>) . snd) m_con_tys' m_tys)
+        ) (a', b') -- NOTE also splits funtys annoyingly
       
       masum = foldrM (flip (fmap . union) . uncurry inst_subty) mempty
-  in if (isJust m_tycon_a)
-      && fromMaybe True (liftA2 (/=) m_tycon_a m_tycon_b)
-    then Nothing -- `a` is more concrete than `b` or their tycons are incompatible
-    else fst (mempty, (a, b, a', b', app_con_a, app_con_b, fun_tys_a, fun_tys_b, (m_tycon_a, m_tycon_tys_a), (m_tycon_b, m_tycon_tys_b))) <> ( -- DEBUG
-        if | not $ null fun_tys_a -> -- function type matching
-            if length fun_tys_a /= length fun_tys_b
-              then Nothing
-              else
-                union <$> inst_subty a' b'
-                <*> masum (zip fun_tys_a fun_tys_b)
-           | Just avar <- getTyVar_maybe a' ->
-            if not $ isTyVarTy b'
-              then Just (singleton avar b') -- beta-reduction
-              else Just mempty
-           | otherwise ->
-            liftA2 union
-              (fromMaybe (Just mempty) (
-                  masum <$> liftA2 zip m_tycon_tys_a m_tycon_tys_b
-                ))
-              (masum (zip app_tys_a app_tys_b))
-      )
+  in snd ((a, b, a', b', m_app_con_a, m_app_tys_a, m_app_con_b, m_app_tys_b, fun_tys_a, fun_tys_b),
+      if | not $ null fun_tys_a -> -- function type matching
+          if length fun_tys_a < length fun_tys_b
+            then Nothing
+            else
+              union <$> inst_subty a' (mkFunTys (drop (length fun_tys_a) fun_tys_b) b') -- allow the possibility that the last term of `a` captures a return function from `b`: i.e. `a` matches `a -> b`
+              <*> masum (zip fun_tys_a fun_tys_b)
+         | isJust (m_app_con_a >>= splitTyConApp_maybe)
+         , not $ fromMaybe False (liftA2 eqType m_app_con_a m_app_con_b)
+         -> Nothing -- `a` is more concrete than `b` or their tycons are incompatible
+         | Just avar <- getTyVar_maybe a' -> -- `a'` may be an application of TyCon on concrete vars: 
+          if not $ isTyVarTy b'
+            then Just (singleton avar b') -- beta-reduction
+            else Just mempty
+         | otherwise -> fromMaybe (Just mempty) (
+            masum <$> liftA2 zip m_app_tys_a m_app_tys_b -- dubiously lenient on matching these tyvars... can we assert the same way that `a`'s need to be more general than `b`'s always?
+          )
+    )
       
       -- &&  -- DEBUG
       -- then args_eq fa_tys_a -- instance type equality assumes that the only things that matter are that one type is more concrete than the other, as well as basic function "subtyping" (i.e. we won't ever be asked if `m (forall a. a -> a) <: m (a -> a)` because we can't create a constraint at a class/data site like `class Foo (a -> b)`)

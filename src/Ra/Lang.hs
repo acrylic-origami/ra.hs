@@ -70,7 +70,7 @@ import Data.Set ( Set(..) )
 import Data.Semigroup ( Semigroup(..), (<>) )
 import Data.Monoid ( Monoid(..), mempty, mconcat )
 import Data.Maybe ( listToMaybe, catMaybes, isJust, fromMaybe )
-import Control.Applicative ( (<|>) )
+import Control.Applicative ( (<|>), liftA2 )
 import Control.Exception ( assert )
 
 import Ra.Extra ( update_head, zipAll, both )
@@ -175,14 +175,8 @@ get_sa_type sa =
 
 sub_sa_types_T :: SymApp -> GenericT
 sub_sa_types_T sa =
-  let sa_ty = get_sa_type sa
-      sa_fun_ret_ty = dig_ret_ty sa_ty where
-        dig_ret_ty ty =
-          let (arg_tys, rhs) = splitFunTysLossy ty
-          in if null $ arg_tys
-            then rhs -- drop forall
-            else dig_ret_ty rhs
-      type_map = snd ((sa_ty, sa), fromMaybe mempty $ inst_subty sa_ty (mkFunTys (map (fromMaybe (error "Blank type from recursive argument") . fmap reduce_types . listToMaybe) (sa_args sa)) sa_fun_ret_ty)) -- beta-reduce all types in the left-hand sides -- account for possibly missing arguments (due to anti-cycle)
+  let (sa_fun_args, sa_fun_ret_ty) = splitFunTysLossy $ everywhere (mkT dropForAlls) $ get_sa_type sa
+      type_map = mconcat $ map (fromMaybe mempty . join . uncurry (liftA2 inst_subty) . (fmap reduce_types . listToMaybe *** pure)) (zip (sa_args sa) sa_fun_args) -- beta-reduce all types in the left-hand sides -- account for possibly missing arguments (due to anti-cycle) -- expect # sa_fun_tys > sa_args 
       tx :: GenericT
       tx = mkT (uncurry fromMaybe . (id &&& join . fmap (type_map!?) . getTyVar_maybe))
   in snd (sa, tx `extT` (\v -> (setVarType v $ everywhere tx $ varType v)))
@@ -267,7 +261,6 @@ is_visited sb sa = any (\case
     AppFrame { af_raw } -> (sa_sym af_raw) == (sa_sym sa)
     _ -> False
   ) sb
-
 
 -- instance Semigroup Stack where
 --   (<>) =

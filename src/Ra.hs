@@ -364,7 +364,8 @@ reduce_deep sa@(SA consumers locstack stack m_sym args thread) =
                       rs_stmts = rs_stmts next_rs <> next_syms <> v -- TODO including both inputs and outputs in the worst-case will duplicate most statements (e.g. if it's a long chain of `>>` and `>>=`), which ends up polluting the top-level, maybe with an exponential number of terms. However, the base case is non-trivial because if it's just this statement alone, we would need to log both as statements for proper coverage.
                     }
                   
-              in if | varString v `elem` [
+              in if | varString v `elem` [ "error" ] -> mempty
+                    | varString v `elem` [
                        "returnIO",
                        "returnSTM",
                        "unSTM",
