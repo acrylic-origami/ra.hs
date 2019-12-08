@@ -370,7 +370,8 @@ reduce_deep sa@(SA consumers locstack stack m_sym args thread) =
                        "unSTM",
                        "unsafeIOToSTM",
                        "atomically",
-                       "stToIO"
+                       "stToIO",
+                       "coerce" -- interesting
                      ]
                     , vs:args'' <- args'
                     -> mconcat $ map (\sa' -> reduce_deep $ sa' { sa_args = ((sa_args sa') <> args'') }) vs

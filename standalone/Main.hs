@@ -138,8 +138,8 @@ module Main where
       tl_binds <- mconcat <$> mapM module_binds (mgModSummaries deps)
       
       let tl_frame = BindFrame $ SymTable {
-              stbl_table = fromMaybe mempty $ or_pat_match_many tl_binds,
-              stbl_binds = tl_binds
+              stbl_table = fromMaybe mempty $ or_pat_match_many tl_binds',
+              stbl_binds = tl_binds'
             }
           tl_binds' = map (second (map (\sa -> sa { sa_stack = tl_frame : (sa_stack sa) }))) tl_binds
       -- mapM (\mss -> do
