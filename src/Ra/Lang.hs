@@ -359,7 +359,7 @@ soft_table_lookup :: Lookup
 soft_table_lookup tbl v = listToMaybe $ elems $ filterWithKey (\q ->
     const $ uncurry (&&) $ (
         (==(varString v)) . varString -- const True
-        &&& isJust . inst_subty (varType v) . varType
+        &&& isJust . flip inst_subty (varType v) . varType -- lookup var that is compatible to the current one (i.e. more generic)
       ) q -- DEBUG
   ) tbl
 
