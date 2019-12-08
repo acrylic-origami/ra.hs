@@ -167,8 +167,7 @@ sa_from_sym s = SA mempty mempty mempty s mempty Nothing
 
 get_sa_type :: SymApp -> Type -- FYI this is the type _after_ reduction; i.e. apps and sections go down an arity, OpApps go down two. The law: this preserves types of all terminal symbols (see HsLam[Case], HsVar, Hs[Over]Lit, ExplicitTuple, ExplicitList)
 get_sa_type sa =
-  let get_expr_type = get_sa_type . sa_from_sym . Sym
-  in case sa_sym sa of
+  case sa_sym sa of
     Sym expr -> get_expr_type expr
     TupleConstr _ -> mkAppTys (error "Report this bug: too lazy to make actual Tuple TyCon.") (map (get_sa_type . head) (sa_args sa))
     ListConstr _ -> mkAppTy (error "Report this bug: too lazy to make actual list TyCon.") (get_sa_type $ head $ head $ sa_args sa)
