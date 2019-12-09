@@ -10,6 +10,7 @@ import GHC
 import HsExtension ( XOverLit(..) )
 import DataCon ( dataConName, dataConRepType )
 import ConLike ( ConLike (..) )
+import Type ( splitAppTy_maybe, splitTyConApp_maybe, dropForAlls, splitFunTys )
 import Name ( mkSystemName, nameOccName )
 import OccName ( mkVarOcc, occNameString )
 import Unique ( mkVarOccUnique )
@@ -374,9 +375,16 @@ reduce_deep sa@(SA consumers locstack stack m_sym args thread) =
                        "stToIO",
                        "coerce" -- interesting
                      ]
+                      || (varString v == "return"
+                          && fromMaybe False (
+                              do
+                                (app_con, _) <- splitAppTy_maybe $ snd $ splitFunTys $ strip_contexts_deep $ everywhere (mkT dropForAlls) $ varType v
+                                (ty_con, _) <- splitTyConApp_maybe app_con
+                                return $ (occNameString $ getOccName ty_con) == "ST"
+                            )
+                        )
                     , vs:args'' <- args'
                     -> mconcat $ map (\sa' -> reduce_deep $ sa' { sa_args = ((sa_args sa') <> args'') }) vs
-                    
                     | varString v `elem` [
                        -- ">>",
                        "thenIO",
