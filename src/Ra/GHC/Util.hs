@@ -15,6 +15,7 @@ module Ra.GHC.Util (
   get_mg_type,
   get_expr_type,
   strip_context,
+  strip_contexts_deep,
   splitFunTysLossy,
   inst_subty
 ) where
@@ -164,7 +165,7 @@ strip_contexts_deep :: GenericT
 strip_contexts_deep = everywhere (mkT $ \z -> fromMaybe z (strip_context z))
 
 splitFunTysLossy :: Type -> ([Type], Type)
-splitFunTysLossy z = splitFunTys strip_contexts_deep
+splitFunTysLossy = splitFunTys . strip_contexts_deep
 
 drop_ty_args :: [Int] -> Type -> Type
 drop_ty_args = drop_ty_args' 0 where
