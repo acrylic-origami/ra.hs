@@ -1,4 +1,4 @@
-{-# LANGUAGE Rank2Types, TupleSections, DeriveFunctor, DeriveDataTypeable, LambdaCase, NamedFieldPuns #-}
+{-# LANGUAGE MultiWayIf, Rank2Types, TupleSections, DeriveFunctor, DeriveDataTypeable, LambdaCase, NamedFieldPuns #-}
 module Ra.Lang (
   Sym(..),
   getSymLoc,
@@ -10,6 +10,7 @@ module Ra.Lang (
   StackKey,
   -- ThreadKey(..),
   StackFrame(..),
+  get_sa_type,
   stack_eq,
   stack_var_lookup,
   soft_table_lookup,
@@ -26,6 +27,7 @@ module Ra.Lang (
   lift_rs_syms2,
   SymApp(..),
   sa_from_sym,
+  sub_types_T,
   sub_sa_types_T,
   sub_sa_types_wo_stack,
   Write,
@@ -63,7 +65,7 @@ import Data.Data ( Data(..), Typeable(..) )
 import Control.Arrow ( first, second, (***), (&&&) )
 import Control.Monad ( join )
 import Data.Coerce ( coerce )
-import Data.Map.Strict ( Map(..), empty, union, unionWith, unionsWith, toList, fromList, (!?), filterWithKey, elems )
+import Data.Map.Strict ( Map(..), empty, union, unionWith, unionsWith, toList, fromList, (!?), filterWithKey, elems, assocs )
 import qualified Data.Map.Strict as M ( map )
 import Data.Generics ( everywhere, everywhereBut, everything, GenericT, extT, mkT, mkQ )
 import Data.Set ( Set(..) )
@@ -173,13 +175,14 @@ get_sa_type sa =
     ListConstr _ -> mkAppTy (error "Report this bug: too lazy to make actual list TyCon.") (get_sa_type $ head $ head $ sa_args sa)
     EntryPoint -> error "Tried to get the type of EntryPoint"
 
+sub_types_T :: Map Id Type -> GenericT
+sub_types_T type_map = mkT (uncurry fromMaybe . (id &&& join . fmap (type_map!?) . getTyVar_maybe))
+
 sub_sa_types_T :: SymApp -> GenericT
 sub_sa_types_T sa =
   let (sa_fun_args, sa_fun_ret_ty) = splitFunTysLossy $ everywhere (mkT dropForAlls) $ get_sa_type sa
       type_map = mconcat $ map (fromMaybe mempty . join . uncurry (liftA2 inst_subty) . (fmap reduce_types . listToMaybe *** pure)) (zip (sa_args sa) sa_fun_args) -- beta-reduce all types in the left-hand sides -- account for possibly missing arguments (due to anti-cycle) -- expect # sa_fun_tys > sa_args 
-      tx :: GenericT
-      tx = mkT (uncurry fromMaybe . (id &&& join . fmap (type_map!?) . getTyVar_maybe))
-  in snd (sa, tx `extT` (\v -> (setVarType v $ everywhere tx $ varType v)))
+  in sub_types_T type_map `extT` (\v -> (setVarType v $ everywhere (sub_types_T type_map) $ varType v))
 
 sub_sa_types_wo_stack :: SymApp -> GenericT
 sub_sa_types_wo_stack sa = everywhereBut (False `mkQ` (const True :: Stack -> Bool)) (sub_sa_types_T sa)
@@ -349,12 +352,14 @@ is_monadic [] = False
 -- stack_var_refs _ = []
 
 soft_table_lookup :: Lookup
-soft_table_lookup tbl v = listToMaybe $ elems $ filterWithKey (\q ->
-    const $ uncurry (&&) $ (
-        (==(varString v)) . varString -- const True
-        &&& isJust . flip inst_subty (varType v) . varType -- lookup var that is compatible to the current one (i.e. more generic)
-      ) q -- DEBUG
-  ) tbl
+soft_table_lookup tbl v = listToMaybe $ catMaybes $ map (\(v', sa) -> -- DUBIOUS listToMaybe: restricting to first result
+    if | varString v == varString v'
+       , varString v == "ap"
+       -> flip sub_types_T sa <$> inst_subty (varType v') (varType v)
+       | varString v == varString v'
+       -> flip sub_types_T sa <$> inst_subty (varType v') (varType v)
+       | otherwise ->  Nothing
+  ) $ assocs tbl
 
 stack_var_lookup :: Stack -> Id -> Maybe [SymApp]
 stack_var_lookup st v =
