@@ -300,7 +300,7 @@ reduce_deep sa@(SA consumers locstack stack m_sym args thread) =
                             stbl_table = next_arg_matches,
                             stbl_binds = next_arg_binds
                           })
-                        next_exprs = everywhereBut (False `mkQ` (const True :: Stack -> Bool)) (sub_sa_types_T sa `extT` (\v -> setVarType v $ sub_sa_types_T sa $ varType v)) -- TEMP ugliness for the Var exception
+                        next_exprs = everywhereBut (False `mkQ` (const True :: Stack -> Bool)) (sub_sa_types_T sa) -- TODO URGENT check if removing the Var special case and letting `sub_sa_types_T` handle it here was the right thing to do
                           $ grhs_exprs $ map (grhssGRHSs . m_grhss . unLoc) $ unLoc $ mg_alts mg -- TEMP
                         bind_pms = pat_match $ map (second (map (\sa' -> sa' {
                             sa_stack = sa_stack sa' ++ (next_af : stack),
