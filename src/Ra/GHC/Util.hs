@@ -196,16 +196,29 @@ inst_subty a b =
             else
               union <$> inst_subty a' (mkFunTys (drop (length fun_tys_a) fun_tys_b) b') -- allow the possibility that the last term of `a` captures a return function from `b`: i.e. `a` matches `a -> b`
               <*> masum (zip fun_tys_a fun_tys_b)
-         | isJust (m_app_con_a >>= splitTyConApp_maybe)
-         , not $ fromMaybe False (liftA2 eqType m_app_con_a m_app_con_b)
-         -> Nothing -- `a` is more concrete than `b` or their tycons are incompatible
-         | Just avar <- getTyVar_maybe a' -> -- `a'` may be an application of TyCon on concrete vars: 
+         | Just (tycon_a, tyargs_a) <- splitTyConApp_maybe a -- `a` is a true TyCon
+         -> case splitTyConApp_maybe b of
+          Just (tycon_b, tyargs_b)
+            | tycon_a == tycon_b -> masum $ zip tyargs_a tyargs_b
+            | otherwise -> Nothing
+          Nothing -> case m_app_con_a >>= splitTyConApp_maybe of
+            Just (tycon_b, tyargs_b)
+              | tycon_a == tycon_b -> masum $ zip tyargs_a tyargs_b
+              | otherwise -> Nothing
+            Nothing -> Nothing
+         | Just avar <- getTyVar_maybe a' ->
           if not $ isTyVarTy b'
             then Just (singleton avar b') -- beta-reduction
             else Just mempty
-         | otherwise -> fromMaybe (Just mempty) (
-            masum <$> liftA2 zip m_app_tys_a m_app_tys_b -- dubiously lenient on matching these tyvars... can we assert the same way that `a`'s need to be more general than `b`'s always?
-          )
+         | isJust (m_app_con_a >>= splitTyConApp_maybe) -- `a'` may be an application of TyCon on concrete vars: 
+         , not $ fromMaybe False (liftA2 eqType m_app_con_a m_app_con_b)
+         -> Nothing -- `a` is more concrete than `b` or their tycons are incompatible
+         | otherwise -> -- `a` is probably a generic AppTy (e.g. `m a`)
+            do
+              args <- snd ((a, b, a', b', m_app_con_a, m_app_tys_a, m_app_con_b, m_app_tys_b, fun_tys_a, fun_tys_b), liftA2 zip m_app_tys_a m_app_tys_b) -- dubiously lenient on matching these tyvars... can we assert the same way that `a`'s need to be more general than `b`'s always?
+              conmap <- join $ liftA2 inst_subty m_app_con_a m_app_con_b
+              argmap <- masum args
+              return $ union conmap argmap
     )
       
       -- &&  -- DEBUG
