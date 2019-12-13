@@ -24,6 +24,7 @@ module Main where
   import Unique ( getUnique, Unique(..) )
   import Bag ( bagToList )
   import qualified Data.Map.Strict as M
+  import Data.Either
   import Data.Map.Strict ( Map(..), unionsWith, keys, toList, insert, insertWith )
   import Data.Generics ( cast, mkT, mkQ, extQ, everything, everythingBut, everywhere, everywhereBut, toConstr, Data(..) )
   import Data.Generics.Extra ( constr_ppr, shallowest, everything_ppr )
@@ -32,8 +33,10 @@ module Main where
   import Data.List ( intersperse )
   import Data.Function ( fix )
   import Data.Maybe ( fromMaybe, catMaybes, listToMaybe )
-  import Control.Monad ( mzero )
+  import Control.Monad ( mzero, void )
   import Control.Monad.IO.Class ( liftIO )
+  
+  import System.CPUTime
   
   import Ra ( or_pat_match_many, pat_match, reduce_deep )
   import Ra.Impure ( reduce )
@@ -114,7 +117,8 @@ module Main where
   main :: IO ()
   main = do
     mod_str:args' <- getArgs
-    (putStrLn=<<) $ runGhc (Just libdir) $ do
+    runGhc (Just libdir) $ do
+      start_time <- liftIO getCPUTime
       dflags <- getSessionDynFlags
       let inc_paths = includePaths dflags
       setSessionDynFlags $ dflags {
@@ -133,9 +137,10 @@ module Main where
       
       -- let n = fromMaybe 6 $ read <$> listToMaybe args'
       
-      return $ show $ map (moduleNameString . moduleName . ms_mod) (mgModSummaries deps)
       
       tl_binds <- mconcat <$> mapM module_binds (mgModSummaries deps)
+      
+      tc_time <- liftIO getCPUTime
       
       let tl_frame = BindFrame $ SymTable {
               stbl_table = fromMaybe mempty $ or_pat_match_many tl_binds',
@@ -182,7 +187,9 @@ module Main where
           -- (OpApp _ _ (L _ (HsWrap _ _ (HsVar _ v))) _) -> [(id &&& varUnique) $ unLoc v]
       --     _ -> []) :: HsExpr GhcTc -> [(Id, Unique)])) $ tl_binds
       -- (constr_var_ppr . map typecheckedSource) <$> mapM module_tcs (mgModSummaries deps)
-      return $ unlines $ map (ppr_sa (showPpr dflags)) $ rs_syms $ mconcat $ map (mconcat . map (head . reduce . flip ReduceSyms mempty . pure) . snd) this_binds
+      liftIO $ putStrLn $ unlines $ map (ppr_sa (showPpr dflags)) $ rs_syms $ mconcat $ map ((head . reduce) . snd) this_binds -- unlines $ map (uncurry (++) . (showPpr dflags . get_sa_type &&& ppr_sa (showPpr dflags))) $ rs_syms
+      end_time <- liftIO getCPUTime
+      liftIO $ putStrLn $ show $ (\f -> f *** f) ((/(10^12)) . fromIntegral) (tc_time - start_time, end_time - tc_time)
       
       -- liftIO (trySerialize tl_pms >>= deserialize >>= return . ppr_pms ppr_unsafe)
       

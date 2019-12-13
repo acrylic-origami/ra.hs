@@ -9,7 +9,7 @@ import GHC
 
 import Data.Maybe ( catMaybes, fromMaybe, fromJust )
 import Data.Generics ( Data, Typeable, mkQ )
-import Data.Generics.Extra ( everywhereWithContextBut, everywhereWithContextLazyBut, mkQT, extQT, gmapQT, GenericQT )
+import Data.Generics.Extra ( everywhereWithContextBut, everywhereWithContextLazyBut, extQT, gmapQT, GenericQT )
 import Control.Arrow ( (&&&), (***), first, second )
 
 import Ra ( reduce_deep, pat_match, and_pat_match_many )
@@ -113,26 +113,27 @@ type WriteSite = (Stack, Stack) -- pipe and value locations
 
 permute2 = concatMap (\(pipes, syms) -> [(pipe, sym) | pipe <- pipes, sym <- syms]) -- TODO stopgap before implementing Map
 
-reduce :: ReduceSyms -> [ReduceSyms]
-reduce syms0 =
-  let iterant :: [DoStmt] -> (Writes, ReduceSyms) -- always act on syms0, return what we get on this phase
+reduce :: [SymApp] -> [ReduceSyms]
+reduce sas0 =
+  let syms0 = mconcat $ map reduce_deep sas0
+      iterant :: [DoStmt] -> (Writes, ReduceSyms) -- always act on syms0, return what we get on this phase
       iterant stmts =
         let writes = catMaybes $ map mk_write stmts
             f0 = (mempty,)
             go :: GenericQT [DoStmt]
             go = first mconcat . (
                 gmapQT go
-                `mkQT` (
+                `extQT` (
                     (\(st0, (st1, sas)) -> (st0 <> st1, sas))
                     . second (
                         mconcat
                         . map (\sa ->
                             let (next_pms, next_sa) = refresh_frames writes sa -- re-pat-match the bindings 
-                                next_rs = reduce_deep $ next_sa
+                                next_rs' = reduce_deep $ next_sa
                             in (
-                                [pms_stmts next_pms, rs_stmts next_rs],
-                                rs_syms next_rs
-                              )
+                                [pms_stmts next_pms, rs_stmts next_rs'], -- obviously did this for a reason but i don't remember why
+                                rs_syms next_rs'
+                              ) -- :: ([[DoStmt]], [SymApp])
                           )
                         . concatMap (expand_reads writes)
                       )
@@ -147,11 +148,14 @@ reduce syms0 =
         })
         
   in map snd
-    $ (!!1)
+    $ head
     $ filter ((\(last_writes, next_rs) ->
-        let next_writes_map = map (both sa_loc) $ permute2 $ catMaybes $ map mk_write $ rs_stmts next_rs
-            last_writes_map = map (both sa_loc) $ permute2 last_writes
-        in all ((`any` last_writes_map) . ((uncurry (&&)).) . uncurry (***) . both stack_eq) next_writes_map
+        let next_writes_map = permute2 $ catMaybes $ map mk_write $ rs_stmts next_rs
+            last_writes_map = permute2 last_writes
+        in all (\next -> any (\prev -> 
+              uncurry (&&) $ (uncurry (&&) . both (uncurry stack_eq) . (both fst &&& both snd) *** uncurry (==)) $ (both (both sa_loc) &&& both (both sa_sym)) (next, prev)
+            ) last_writes_map) next_writes_map
+          -- sometimes pointfree isn't worth it: ((uncurry (&&)).) . uncurry (***) . both ((uncurry (&&).) . (curry (uncurry stack_eq . both sa_loc) &&& curry (uncurry (==) . both sa_sym)))
       ) . head)
     $ iterate (\l -> (iterant $ rs_stmts $ snd $ head l):l) [(mempty, syms0)] -- NOTE ulterior necessity of logging statements: expansions of writes are progressive, so we may blitz through tagging all the writes, but reads could unravel one layer at a time
   -- takeWhile (not . null . rs_writes) $ foldl (\l _ -> l ++ [iterant $ head l]) [syms0] [0..] -- interesting that this doesn't seem to be possible
