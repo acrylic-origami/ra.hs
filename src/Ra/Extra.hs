@@ -1,6 +1,10 @@
 module Ra.Extra (
   update_head,
   zipAll,
+  fpackl,
+  fpackr,
+  packl,
+  packr,
   list_alt,
   map_alt,
   both
@@ -16,6 +20,16 @@ module Ra.Extra (
   zipAll (a:as) [] = (Just a, Nothing) : zipAll as []
   zipAll [] (b:bs) = (Nothing, Just b) : zipAll [] bs
   zipAll [] [] = []
+  
+  -- packr :: ((a, b), c) -> (a, (b, c))
+  -- packr = uncurry $ uncurry $ ((.(,)) . (.)) . (,)
+  fpackl :: (a -> b -> c -> d) -> (((a, b), c) -> d)
+  fpackl = uncurry . uncurry
+  fpackr :: (a -> b -> c -> d) -> ((a, (b, c)) -> d)
+  fpackr = uncurry . (uncurry.)
+  
+  packr a b c = (a, (b, c))
+  packl a b c = ((a, b), c)
   
   lumpAll :: [[a]] -> [[a]] -> [[a]]
   lumpAll (x:xs) (y:ys) = (x ++ y) : lumpAll xs ys

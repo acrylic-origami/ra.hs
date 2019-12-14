@@ -1,4 +1,4 @@
-{-# LANGUAGE MultiWayIf, LambdaCase, NamedFieldPuns, TupleSections, DeriveDataTypeable #-}
+{-# LANGUAGE MultiWayIf, LambdaCase, NamedFieldPuns, TupleSections, DeriveDataTypeable, Rank2Types #-}
 
 module Ra.Impure (
   reduce,
@@ -76,7 +76,7 @@ refresh_frames ws sa =
                 -- outside of generic query because otherwise it'll cause infinite
                 -- recursion, and `extQT` was even more awkward
                 
-                let next_binds = snd (sa, map (second (concatMap (expand_reads ws))) (stbl_binds bf_syms)) -- DEBUG
+                let next_binds = snd (sa, map (second (concatMap (uncurry list_alt) . uncurry zip . (map (expand_reads ws) &&& map pure))) (stbl_binds bf_syms)) -- DEBUG
                     next_pms = pat_match next_binds
                 in (next_pms, BindFrame (pms_syms next_pms))
               _ -> (mempty, frame)
@@ -113,51 +113,59 @@ type WriteSite = (Stack, Stack) -- pipe and value locations
 
 permute2 = concatMap (\(pipes, syms) -> [(pipe, sym) | pipe <- pipes, sym <- syms]) -- TODO stopgap before implementing Map
 
-reduce :: [SymApp] -> [ReduceSyms]
+reduce :: [SymApp] -> ReduceSyms
 reduce sas0 =
   let syms0 = mconcat $ map reduce_deep sas0
-      iterant :: [DoStmt] -> (Writes, ReduceSyms) -- always act on syms0, return what we get on this phase
-      iterant stmts =
-        let writes = catMaybes $ map mk_write stmts
-            f0 = (mempty,)
-            go :: GenericQT [DoStmt]
-            go = first mconcat . (
-                gmapQT go
-                `extQT` (
-                    (\(st0, (st1, sas)) -> (st0 <> st1, sas))
-                    . second (
-                        mconcat
-                        . map (\sa ->
-                            let (next_pms, next_sa) = refresh_frames writes sa -- re-pat-match the bindings 
-                                next_rs' = reduce_deep $ next_sa
-                            in (
-                                [pms_stmts next_pms, rs_stmts next_rs'], -- obviously did this for a reason but i don't remember why
-                                rs_syms next_rs'
-                              ) -- :: ([[DoStmt]], [SymApp])
-                          )
-                        . concatMap (expand_reads writes)
-                      )
-                    . gmapQT go
-                  )
-                `extQT` ((\fr -> case fr of { BindFrame {} -> f0 fr; _ -> gmapQT go fr }) :: StackFrame -> ([[DoStmt]], StackFrame))
-              )
-            (next_stmts, next_rs) = go syms0
+  
+      f0 = (mempty,)
+      
+      go :: [Write] -> GenericQT (Bool, [DoStmt])
+      go writes = first ((or *** mconcat) . unzip) . (
+          gmapQT (go writes)
+          `extQT` ( -- TODO there's some canonical way to do this non-imperatively. even with Bool not sharing classes with []. find it.
+              ( -- ehh.
+                  first pure -- eh.
+                  . first (second (uncurry (<>)) . fpackl packr) . fpackr packl . second ((rs_stmts &&& rs_syms) . mconcat . map reduce_deep)
+                  . fpackr packl . first (uncurry (||)) . fpackr packl -- ((Bool, [DoStmt]), [SymApp])
+                  . second (
+                      fpackl packr . first ((or *** mconcat) . unzip)  -- (Bool, ([DoStmt], [SymApp]))
+                      . gmapQT (go writes) -- ([(Bool, [DoStmt])], [SymApp])
+                    )
+                  . (or *** concatMap (uncurry list_alt) . uncurry zip) -- (Bool, [SymApp])
+                  . fpackl packr -- ([Bool], ([[SymApp]], [[SymApp]]))
+                  . (unzip . map ((not . null &&& id) . expand_reads writes) &&& map pure) -- (([Bool], [[SymApp]]), [[SymApp]])
+                )
+            )
+          `extQT` ((\fr -> case fr of { BindFrame {} -> f0 fr; _ -> gmapQT (go writes) fr }) :: StackFrame -> ([(Bool, [DoStmt])], StackFrame))
+        )
+      
+      iterant :: [DoStmt] -> [DoStmt] -> (Writes, ([DoStmt], [DoStmt])) -- always act on syms0, return what we get on this phase
+      iterant old_stmts new_stmts =
+        let (old_writes, new_writes) = both (catMaybes . map mk_write) (old_stmts, new_stmts)
+            ((old_changed, new_stmts_from_old), (next_old_stmts, next_syms)) = go new_writes (old_stmts, rs_syms syms0)
+            ((new_changed, new_stmts_from_new), next_new_stmts) = go (old_writes <> new_writes) new_stmts
 
-        in (writes, next_rs {
-          rs_stmts = rs_stmts next_rs <> next_stmts
-        })
+        in (
+            old_writes <> new_writes,
+            (
+                old_stmts <> new_stmts,
+                new_stmts_from_old <> (if old_changed then next_old_stmts else mempty)
+                <> new_stmts_from_new <> (if new_changed then next_new_stmts else mempty)
+              )
+          )
         
-  in map snd
+  in (\(ws, (old_stmts, new_stmts)) -> ReduceSyms (snd $ go ws (rs_syms syms0)) (old_stmts <> new_stmts))
     $ head
-    $ filter ((\(last_writes, next_rs) ->
-        let next_writes_map = permute2 $ catMaybes $ map mk_write $ rs_stmts next_rs
+    $ head
+    $ filter ((\(last_writes, (_, new_stmts)) ->
+        let next_writes_map = permute2 $ catMaybes $ map mk_write new_stmts
             last_writes_map = permute2 last_writes
-        in all (\next -> any (\prev -> 
-              uncurry (&&) $ (uncurry (&&) . both (uncurry stack_eq) . (both fst &&& both snd) *** uncurry (==)) $ (both (both sa_loc) &&& both (both sa_sym)) (next, prev)
-            ) last_writes_map) next_writes_map
+        in snd ((next_writes_map, last_writes_map), all (\next -> any (\prev -> 
+              uncurry (&&) $ (uncurry (&&) . both (uncurry stack_eq) . (both fst &&& both snd) *** uncurry (==)) $ (both (both sa_loc) &&& both (both sa_sym)) (next, prev) -- eh.
+            ) last_writes_map) next_writes_map)
           -- sometimes pointfree isn't worth it: ((uncurry (&&)).) . uncurry (***) . both ((uncurry (&&).) . (curry (uncurry stack_eq . both sa_loc) &&& curry (uncurry (==) . both sa_sym)))
       ) . head)
-    $ iterate (\l -> (iterant $ rs_stmts $ snd $ head l):l) [(mempty, syms0)] -- NOTE ulterior necessity of logging statements: expansions of writes are progressive, so we may blitz through tagging all the writes, but reads could unravel one layer at a time
+    $ iterate (\l -> (uncurry iterant $ snd $ head l):l) [(mempty, (mempty, rs_stmts syms0))] -- NOTE ulterior necessity of logging statements: expansions of writes are progressive, so we may blitz through tagging all the writes, but reads could unravel one layer at a time
   -- takeWhile (not . null . rs_writes) $ foldl (\l _ -> l ++ [iterant $ head l]) [syms0] [0..] -- interesting that this doesn't seem to be possible
   
 {-
@@ -181,10 +189,10 @@ expand_reads = expand_reads' 0 where
                         "newTVarIO",
                         "newIORef",
                         "newSTRef"
-                      ] -> concatMap (expand_reads' (n + 1) ws) $ unref ws (sa' { sa_args = rest })
-                    | otherwise -> [sa']
+                      ] -> concatMap (uncurry list_alt) $ map ((expand_reads' (n + 1) ws) &&& pure) $ unref ws (sa' { sa_args = rest })
+                    | otherwise -> []
               ) arg0
-            | otherwise = [sa]
+            | otherwise = []
       in case sa_sym sa of
         Sym (L _ (HsVar _ (L _ v))) ->
           if | varString v `elem` [
@@ -205,6 +213,6 @@ expand_reads = expand_reads' 0 where
                 sa_args = [[sa], [sa]]
               }) next_read_syms
              
-             | otherwise -> [sa]
-        _ -> [sa]
-    | otherwise = [sa]
+             | otherwise -> []
+        _ -> []
+    | otherwise = []

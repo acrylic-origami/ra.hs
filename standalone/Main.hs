@@ -187,7 +187,7 @@ module Main where
           -- (OpApp _ _ (L _ (HsWrap _ _ (HsVar _ v))) _) -> [(id &&& varUnique) $ unLoc v]
       --     _ -> []) :: HsExpr GhcTc -> [(Id, Unique)])) $ tl_binds
       -- (constr_var_ppr . map typecheckedSource) <$> mapM module_tcs (mgModSummaries deps)
-      liftIO $ putStrLn $ unlines $ map (ppr_sa (showPpr dflags)) $ rs_syms $ mconcat $ map ((head . reduce) . snd) this_binds -- unlines $ map (uncurry (++) . (showPpr dflags . get_sa_type &&& ppr_sa (showPpr dflags))) $ rs_syms
+      liftIO $ putStrLn $ unlines $ map (ppr_sa (showPpr dflags)) $ rs_syms $ mconcat $ map (reduce . snd) this_binds -- unlines $ map (uncurry (++) . (showPpr dflags . get_sa_type &&& ppr_sa (showPpr dflags))) $ rs_syms
       end_time <- liftIO getCPUTime
       liftIO $ putStrLn $ show $ (\f -> f *** f) ((/(10^12)) . fromIntegral) (tc_time - start_time, end_time - tc_time)
       
