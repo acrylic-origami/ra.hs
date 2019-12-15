@@ -25,8 +25,9 @@ import qualified Data.Map.Strict as M ( map, elems, assocs )
 
 type Printer = (forall o. Outputable o => o -> String)
 
-ppr_sa :: Printer -> SymApp -> String
+ppr_sa :: Printer -> SymApp Sym -> String
 ppr_sa show' = go 0 where
+  go :: Int -> SymApp Sym -> String
   go n = 
     let indent = (replicate n ' ')
     in  (++(indent ++ ">"))

@@ -119,15 +119,15 @@ instance Eq Sym where
 --     expr = f $ expr sym
 --   }
   
-type Bind = (LPat GhcTc, [SymApp])
-type LUT = Map Id [SymApp]
+type Bind = (LPat GhcTc, [SymApp Sym])
+type LUT = Map Id [SymApp Sym]
 data SymTable = SymTable {
   stbl_table :: LUT, -- strictly speaking, binds => table always, but it's so expensive both performance-wise and in code, so memoization does something good here
   stbl_binds :: [Bind]
 }
   deriving (Data, Typeable)
 
-type Lookup = LUT -> Id -> Maybe [SymApp]
+type Lookup = LUT -> Id -> Maybe [SymApp Sym]
 
 instance Semigroup SymTable where
   (SymTable ltbl lbinds) <> (SymTable rtbl rbinds) = SymTable (unionWith (++) ltbl rtbl) (lbinds <> rbinds)
@@ -137,9 +137,9 @@ instance Monoid SymTable where
   mappend = (<>)
 
 type StackKey = [SrcSpan]
-type Thread = SymApp
+type Thread = SymApp Sym
 -- data ThreadKey = TKNormal StackKey | TKEnemy -- ThreadKey is specialized so only the stack above the latest forkIO call is included
-type Write = ([Pipe], [SymApp])
+type Write = ([Pipe], [SymApp Sym])
 
 -- Write instances allowing them to be keys
 -- instance Eq Write where
@@ -149,10 +149,10 @@ type Write = ([Pipe], [SymApp])
 --   (Write l_stack _) <= (Write r_stack _) = l_loc <= r_loc
   
 type Writes = [Write] -- TODO not my prettiest kludge: this went from unique pipe to many writes (in a Map) to non-unique pipe to many writes (`[(Pipe, [Write])]`) to this: a free-for-all relationship. All to allow `pat_match` to be generic.
-type DoStmt = SymApp
-type Pipe = SymApp -- LHsExpr GhcTc
+type DoStmt = SymApp Sym
+type Pipe = SymApp Sym -- LHsExpr GhcTc
 
-data SymApp = SA {
+data SymApp s = SA {
   sa_consumers :: [StackKey],
   sa_is_monadic :: Bool,
   sa_loc :: Stack,
@@ -160,14 +160,14 @@ data SymApp = SA {
     -- laws for `consumers`:
     -- 1. if a term is consumed and decomposed or part of an unknown/partial application, the whole term is consumed under the same consumer[s]
     -- 2. if a term goes through multiple consumers, they're all tracked for races individually
-  sa_sym :: Sym,
-  sa_args :: [[SymApp]],
-  sa_thread :: Maybe SymApp -- TODO consider a more elegant type
+  sa_sym :: s,
+  sa_args :: [[SymApp s]],
+  sa_thread :: Maybe (SymApp s) -- TODO consider a more elegant type
 } deriving (Data, Typeable) -- 2D tree. Too bad we can't use Tree; the semantics are totally different
 
 sa_from_sym s = SA mempty False mempty mempty s mempty Nothing
 
-get_sa_type :: SymApp -> Type -- FYI this is the type _after_ reduction; i.e. apps and sections go down an arity, OpApps go down two. The law: this preserves types of all terminal symbols (see HsLam[Case], HsVar, Hs[Over]Lit, ExplicitTuple, ExplicitList)
+get_sa_type :: SymApp Sym -> Type -- FYI this is the type _after_ reduction; i.e. apps and sections go down an arity, OpApps go down two. The law: this preserves types of all terminal symbols (see HsLam[Case], HsVar, Hs[Over]Lit, ExplicitTuple, ExplicitList)
 get_sa_type sa =
   case sa_sym sa of
     Sym expr -> get_expr_type expr
@@ -178,16 +178,16 @@ get_sa_type sa =
 sub_types_T :: Map Id Type -> GenericT
 sub_types_T type_map = mkT (uncurry fromMaybe . (id &&& join . fmap (type_map!?) . getTyVar_maybe))
 
-sub_sa_types_T :: SymApp -> GenericT
+sub_sa_types_T :: SymApp Sym -> GenericT
 sub_sa_types_T sa =
   let (sa_fun_args, sa_fun_ret_ty) = splitFunTysLossy $ everywhere (mkT dropForAlls) $ get_sa_type sa
       type_map = mconcat $ map (fromMaybe mempty . join . uncurry (liftA2 inst_subty) . (fmap reduce_types . listToMaybe *** pure)) (zip (sa_args sa) sa_fun_args) -- beta-reduce all types in the left-hand sides -- account for possibly missing arguments (due to anti-cycle) -- expect # sa_fun_tys > sa_args 
   in sub_types_T type_map `extT` (\v -> (setVarType v $ everywhere (sub_types_T type_map) $ varType v))
 
-sub_sa_types_wo_stack :: SymApp -> GenericT
+sub_sa_types_wo_stack :: SymApp Sym -> GenericT
 sub_sa_types_wo_stack sa = everywhereBut (False `mkQ` (const True :: Stack -> Bool)) (sub_sa_types_T sa)
   
-reduce_types :: SymApp -> Type
+reduce_types :: SymApp Sym -> Type
 reduce_types sa = uncurry mkFunTys $ everywhere (sub_sa_types_T sa) $ first (drop (length $ sa_args sa)) $ splitFunTysLossy $ get_sa_type sa
   
 -- instance Eq SymApp where
@@ -236,13 +236,12 @@ pms2rs pms = ReduceSyms {
 data StackFrame =
   EmptyFrame
   | AppFrame {
-    af_raw :: SymApp, -- for anti-cycle purposes
+    af_raw :: SymApp Sym, -- for anti-cycle purposes
     af_syms :: SymTable
   }
   | BindFrame {
     bf_syms :: SymTable
   }
-  | StmtFrame
   deriving (Data, Typeable)
 
 -- BOOKMARK: Stack needs to be oufitted with the graph of bindings that refer to each other, in case a hold resolves and a new pattern match works.
@@ -328,7 +327,7 @@ is_zeroth_kind _ = False
     then drop ((length stack) - (head $ st_thread stack)) $ make_loc_key stack
     else mempty -}
 
-make_loc_key :: SymApp -> StackKey
+make_loc_key :: SymApp Sym -> StackKey
 make_loc_key = uncurry (:) . (
     getSymLoc . sa_sym
     &&& catMaybes . map (\case
@@ -355,7 +354,7 @@ soft_table_lookup tbl v = listToMaybe $ catMaybes $ map (\(v', sa) -> -- DUBIOUS
        | otherwise ->  Nothing
   ) $ assocs tbl
 
-stack_var_lookup :: Stack -> Id -> Maybe [SymApp]
+stack_var_lookup :: Stack -> Id -> Maybe [SymApp Sym]
 stack_var_lookup st v =
   let folder syms = uncurry ($) . first ((<|>) . ($(stbl_table syms)))
   in snd $ foldr (

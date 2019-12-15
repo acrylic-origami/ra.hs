@@ -57,7 +57,7 @@ import Ra.Refs ( write_funs, read_funs )
 
 pat_match_one ::
   LPat GhcTc
-  -> SymApp
+  -> SymApp Sym
   -> Maybe LUT
 pat_match_one pat sa =
   case unLoc pat of
@@ -132,7 +132,7 @@ pat_match_many f = foldr1 f . map mapper
   where mapper (pat, exprs@(_:_)) = foldr1 f $ map (pat_match_one pat) exprs
         mapper _ = Nothing -- TODO being a little sloppy here, assuming that `Nothing` is an acceptable result for a default. In fact, note that if `f` was `const (const (Just mempty))` this would still return `Nothing` if there are single matches. Then there's a sharp phase change with 2 elems when they all pass. 
 
-sub :: Map Id [SymApp] -> SymApp -> Maybe ReduceSyms
+sub :: Map Id [SymApp Sym] -> SymApp Sym -> Maybe ReduceSyms
 sub t sa = -- assumes incoming term is a normal form
   let subbed_sa = sub_sa_types_wo_stack sa sa -- really hope this works
   in case sa_sym subbed_sa of
@@ -148,12 +148,18 @@ sub t sa = -- assumes incoming term is a normal form
       <$> (snd $ (sa, t !? v)) -- DEBUG
     _ -> Nothing
 
+reloc :: SymApp Sym -> SymApp Sym -> SymApp Sym
+reloc sa' sa = sa' {
+    sa_sym = setSymLoc (sa_sym sa') (getSymLoc (sa_sym sa)),
+    sa_loc = sa_loc sa
+  }
+
 pat_match :: [Bind] -> PatMatchSyms
 pat_match binds = 
   let dig :: LUT -> GenericQT [DoStmt]
       dig table = dig' 0 where
         dig' :: Int -> GenericQT [DoStmt]
-        dig' n | n < max_iter -- dig' nominally takes either [SymApp] (interally) or PatMatchSyms (externally)
+        dig' n | n < max_iter -- dig' nominally takes either [SymApp Sym] (interally) or PatMatchSyms (externally)
                = go True where
                 go :: Bool -> GenericQT [DoStmt]
                 go is_first = first mconcat . ( -- not in love with outer mconcat but it's more common among the queries than it is uncommon
@@ -214,10 +220,10 @@ pat_match binds =
         
       (stmtsn, pmsn) = dig (fromMaybe mempty $ or_pat_match_many binds0) pms0
       
-      tie_to_table :: Data d => d -> d
-      tie_to_table = mkT (\sa -> sa {
+      tie_to_table :: GenericT
+      tie_to_table = mkT (\sa -> (sa {
           sa_stack = ((BindFrame next_table):) (sa_stack sa)
-        })
+        } :: SymApp Sym))
       
       next_map = if length (stbl_binds $ pms_syms pmsn) > 0
         then fromMaybe mempty (or_pat_match_many (stbl_binds $ pms_syms pmsn)) -- `or` here because scattered bindings
@@ -244,7 +250,7 @@ pat_match binds =
 -- app_types :: Type -> Type -> Type
 -- app_types l r = uncurry mkFunTys $ first (update_head (const r)) $ splitFunTys l
 
-reduce_deep :: SymApp -> ReduceSyms
+reduce_deep :: SymApp Sym -> ReduceSyms
 reduce_deep sa | let args = sa_args sa
                      sym = sa_sym sa
                , length args > 0 && is_zeroth_kind sym = error $ "Application on " ++ (show $ toConstr sym)

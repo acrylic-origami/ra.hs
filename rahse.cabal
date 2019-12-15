@@ -16,10 +16,35 @@ build-type:          Simple
 extra-source-files:  ChangeLog.md
 cabal-version:       >=1.10
 
-executable rahse
+executable rahse-exec
   main-is:				  Main.hs
   other-modules:       Ra, Ra.Impure Ra.GHC.Translate, Ra.GHC.Util, Ra.Refs, Ra.Lang, Ra.Lang.Extra, Ra.Extra
   -- other-extensions:    
   build-depends:       base, ghc >= 8.2.2, ghc-paths >= 0.1.0.9, syb >= 0.7, bytestring, containers, fgl, syb-extra
-  hs-source-dirs:      src, syb-extra/src, standalone, purebase/hiddens, purebase/insts, purebase/base
+  hs-source-dirs:      src, standalone, purebase/hiddens, purebase/insts, purebase/base
   default-language:    Haskell2010
+
+
+library
+  exposed-modules:     Ra, Ra.Impure, Ra.GHC.Translate, Ra.GHC.Util, Ra.Refs, Ra.Lang, Ra.Lang.Extra, Ra.Extra
+  -- other-extensions:    
+  build-depends:       base, ghc >= 8.2.2, ghc-paths >= 0.1.0.9, syb >= 0.7, bytestring, containers, syb-extra, fgl
+  hs-source-dirs:      src
+  default-language:    Haskell2010
+  
+executable tests
+  -- type: exitcode-stdio-1.0
+  main-is: Tests.hs
+  other-modules: Test.Util.Lang, Test.Util.Predicate, Test.Util.Typecheck
+  hs-source-dirs:
+    test
+  build-depends:
+    base,
+    ghc,
+    ghc-paths,
+    rahse,
+    syb,
+    syb-extra,
+    test-framework,
+    test-framework-hunit, HUnit
+  default-language: Haskell2010

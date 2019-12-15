@@ -17,7 +17,7 @@ import Ra.Lang
 import Ra.Extra
 import Ra.GHC.Util ( varString )
 
-mk_write :: SymApp -> Maybe Write
+mk_write :: SymApp Sym -> Maybe Write
 mk_write sa | Sym (L _ (HsVar _ (L _ v))) <- sa_sym sa =
               if | varString v `elem` [
                     "writeIORef",
@@ -56,7 +56,7 @@ mk_write sa | Sym (L _ (HsVar _ (L _ v))) <- sa_sym sa =
              | otherwise = mempty
 
 
-refresh_frames :: Writes -> SymApp -> (PatMatchSyms, SymApp)
+refresh_frames :: Writes -> SymApp Sym -> (PatMatchSyms, SymApp Sym)
 refresh_frames ws sa =
   let (next_pms, next_stack) =
         first mconcat $ unzip $ map (\frame ->
@@ -83,7 +83,7 @@ refresh_frames ws sa =
           ) (sa_stack sa) -- DEBUG
   in (next_pms, sa { sa_stack = next_stack })
 
-unref :: Writes -> SymApp -> [SymApp]
+unref :: Writes -> SymApp Sym -> [SymApp Sym]
 unref ws sa =
   let bases = snd $ foldl (\(max_len, sas) (pipes, next_sas) ->
           let m_next_max_len = foldr (\pipe ->
@@ -109,11 +109,9 @@ unref ws sa =
     }) bases
 
 
-type WriteSite = (Stack, Stack) -- pipe and value locations
-
 permute2 = concatMap (\(pipes, syms) -> [(pipe, sym) | pipe <- pipes, sym <- syms]) -- TODO stopgap before implementing Map
 
-reduce :: [SymApp] -> ReduceSyms
+reduce :: [SymApp Sym] -> ReduceSyms
 reduce sas0 =
   let syms0 = mconcat $ map reduce_deep sas0
   
@@ -126,14 +124,14 @@ reduce sas0 =
               ( -- ehh.
                   first pure -- eh.
                   . first (second (uncurry (<>)) . fpackl packr) . fpackr packl . second ((rs_stmts &&& rs_syms) . mconcat . map reduce_deep)
-                  . fpackr packl . first (uncurry (||)) . fpackr packl -- ((Bool, [DoStmt]), [SymApp])
+                  . fpackr packl . first (uncurry (||)) . fpackr packl -- ((Bool, [DoStmt]), [SymApp Sym])
                   . second (
-                      fpackl packr . first ((or *** mconcat) . unzip)  -- (Bool, ([DoStmt], [SymApp]))
-                      . gmapQT (go writes) -- ([(Bool, [DoStmt])], [SymApp])
+                      fpackl packr . first ((or *** mconcat) . unzip)  -- (Bool, ([DoStmt], [SymApp Sym]))
+                      . gmapQT (go writes) -- ([(Bool, [DoStmt])], [SymApp Sym])
                     )
-                  . (or *** concatMap (uncurry list_alt) . uncurry zip) -- (Bool, [SymApp])
-                  . fpackl packr -- ([Bool], ([[SymApp]], [[SymApp]]))
-                  . (unzip . map ((not . null &&& id) . expand_reads writes) &&& map pure) -- (([Bool], [[SymApp]]), [[SymApp]])
+                  . (or *** concatMap (uncurry list_alt) . uncurry zip) -- (Bool, [SymApp Sym])
+                  . fpackl packr -- ([Bool], ([[SymApp Sym]], [[SymApp Sym]]))
+                  . (unzip . map ((not . null &&& id) . expand_reads writes) &&& map pure) -- (([Bool], [[SymApp Sym]]), [[SymApp Sym]])
                 )
             )
           `extQT` ((\fr -> case fr of { BindFrame {} -> f0 fr; _ -> gmapQT (go writes) fr }) :: StackFrame -> ([(Bool, [DoStmt])], StackFrame))
@@ -174,7 +172,7 @@ in if sa_loc sa `elem` map fst reads && sa_loc sa' `elem` map snd reads
   else ([(sa_loc sa, sa_loc sa')], nf_sas)
 -}
 
-expand_reads :: [Write] -> SymApp -> [SymApp]
+expand_reads :: [Write] -> SymApp Sym -> [SymApp Sym]
 expand_reads = expand_reads' 0 where
   expand_reads' n ws sa
     | n < sum (map (length . fst) ws) = -- reeeeeeeally crude upper bound for now
