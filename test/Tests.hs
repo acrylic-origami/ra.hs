@@ -218,4 +218,17 @@ pipe_tests = testGroup "Pipe tests" [
               "  f'"
             ]
       in runGhc (Just libdir) $ tc_hang_test pgm
+        
+    , testCase "Simple desugared `do` with pipes" $
+      let pgm = unlines [
+              "import Prelude hiding ( (>>), (>>=) )",
+              "import Control.Concurrent.MVar",
+              "import GHC.Base ( bindIO, thenIO )",
+              "(>>=) = bindIO",
+              "(>>) = thenIO",
+              "f = newEmptyMVar",
+              "  >>= (\\v -> putMVar v () >> readMVar v)"
+            ]
+          expect = [tSA "()" []]
+      in runGhc (Just libdir) $ tc_test pgm $ any_result_match or expect
   ]
