@@ -17,7 +17,6 @@ module Ra.Lang (
   make_loc_key,
   -- make_thread_key,
   stack_apps,
-  is_monadic,
   update_head_table,
   ReduceSyms(..),
   PatMatchSyms(..),
@@ -155,6 +154,7 @@ type Pipe = SymApp -- LHsExpr GhcTc
 
 data SymApp = SA {
   sa_consumers :: [StackKey],
+  sa_is_monadic :: Bool,
   sa_loc :: Stack,
   sa_stack :: Stack,
     -- laws for `consumers`:
@@ -165,7 +165,7 @@ data SymApp = SA {
   sa_thread :: Maybe SymApp -- TODO consider a more elegant type
 } deriving (Data, Typeable) -- 2D tree. Too bad we can't use Tree; the semantics are totally different
 
-sa_from_sym s = SA mempty mempty mempty s mempty Nothing
+sa_from_sym s = SA mempty False mempty mempty s mempty Nothing
 
 get_sa_type :: SymApp -> Type -- FYI this is the type _after_ reduction; i.e. apps and sections go down an arity, OpApps go down two. The law: this preserves types of all terminal symbols (see HsLam[Case], HsVar, Hs[Over]Lit, ExplicitTuple, ExplicitList)
 get_sa_type sa =
@@ -339,12 +339,6 @@ make_loc_key = uncurry (:) . (
 
 stack_apps :: Stack -> [StackFrame]
 stack_apps = filter (\case { AppFrame {} -> True; _ -> False })
-
-is_monadic :: Stack -> Bool
-is_monadic (AppFrame{}:_) = False
-is_monadic (StmtFrame:_) = True
-is_monadic (_:rest) = is_monadic rest
-is_monadic [] = False
 
 -- stack_var_refs used for the law that var resolution cycles only apply to the tail
 -- stack_var_refs :: Stack -> [Id]

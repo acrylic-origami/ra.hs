@@ -49,12 +49,12 @@ grhs_binds with_abs_exports = go False where
     (
         concat (gmapQ (go is_do) a)
         `mkQ` (bind_to_table with_abs_exports)
-        `extQ` (uncurry (++) . ((concat . gmapQ (go is_do)) &&& ((\case
+        `extQ` (uncurry (++) . ((concat . gmapQ (go False)) &&& ((\case
             BindStmt _ pat expr _ _ ->
               let sa = sa_from_sym (Sym expr)
               in if is_do
                 then [(pat, [sa {
-                    sa_loc = StmtFrame : sa_loc sa
+                    sa_is_monadic = True
                   }])] -- TODO check if a fresh stack key here is the right thing to do
                 else [(pat, [sa])]
             _ -> mempty

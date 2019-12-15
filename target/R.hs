@@ -5,22 +5,12 @@ import Control.Concurrent.MVar
 import Data.STRef
 import Data.IORef
 
-f = do
-  a <- newEmptyMVar
-  b <- newEmptyMVar
-  c <- newEmptyMVar
-  d <- newEmptyMVar
-  
-  putMVar a ()
-  
-  -- fan-out
-  av <- readMVar a
-  putMVar b av
-  putMVar c (av, ())
-  
-  -- fan-in
-  bv <- readMVar b
-  cv <- readMVar c
-  putMVar d (bv, cv)
-  
-  readMVar d -- expect ((), ((), ()))
+f = newEmptyMVar
+g = do
+  v <- f
+  w <- f
+  putMVar v 0
+  putMVar w 1
+  v' <- readMVar v
+  w' <- readMVar w
+  return (v', w')

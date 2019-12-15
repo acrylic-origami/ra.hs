@@ -162,9 +162,13 @@ pat_match binds =
                         second concat
                         . unzip . map (\sa ->
                             second (map (\sa' ->
-                              if is_first && is_monadic (sa_loc sa)
-                                then reloc sa sa'
-                                else sa'
+                              (
+                                  if sa_is_monadic sa
+                                    then reloc sa' sa
+                                    else sa'
+                                ) {
+                                  sa_is_monadic = snd (sa', sa_is_monadic sa)
+                                }
                             )) $ (
                               if | Just next_rs <- sub table sa
                                  , (next_stmts, next_sas) <- dig' (n + 1) (rs_syms next_rs)
@@ -178,22 +182,7 @@ pat_match binds =
                   )
         dig' _ = (mempty,)
         
-        reloc :: SymApp -> SymApp -> SymApp
-        reloc sa sa' =
-          if | Sym (L _ s'@(HsVar _ (L _ v'))) <- sa_sym sa'
-             , varString v' `elem` [ "newMVar", "newEmptyMVar", "newTVar", "newTVarIO", "newIORef", "newSTRef" ]
-             -> sa' {
-                sa_sym = setSymLoc (sa_sym sa') (getSymLoc $ sa_sym sa),
-                sa_loc = sa_loc sa
-              }
-             | otherwise
-             -> sa' {
-                sa_sym = setSymLoc (sa_sym sa') (getSymLoc $ sa_sym sa), -- TODO propagation of location (hopefully this is right! Hopefully... re: anti-cycle based on location matching)
-                sa_loc = StmtFrame : sa_loc sa' -- propagation of statement
-              }
-             | otherwise -> sa'
-      
-      (rs0, binds0) = first mconcat $ unzip $ map ((\(pat, rs) -> (rs, (pat, rs_syms rs))) . second (mconcat . map reduce_deep)) binds -- don't assume any symapps coming in are NF
+      (rs0, binds0) = first mconcat $ unzip $ map ((\(pat, rs) -> (rs, (pat, rs_syms rs))) . second (mconcat . map reduce_deep)) binds -- don't assume any SymApp Syms coming in are NF
       pms0 = PatMatchSyms {
         pms_stmts = rs_stmts rs0,
         pms_syms = mempty {
@@ -259,7 +248,7 @@ reduce_deep :: SymApp -> ReduceSyms
 reduce_deep sa | let args = sa_args sa
                      sym = sa_sym sa
                , length args > 0 && is_zeroth_kind sym = error $ "Application on " ++ (show $ toConstr sym)
-reduce_deep sa@(SA consumers locstack stack m_sym args thread) =
+reduce_deep sa@(SA consumers is_monadic locstack stack m_sym args thread) =
   -------------------
   -- SYM BASE CASE --
   -------------------
@@ -269,6 +258,7 @@ reduce_deep sa@(SA consumers locstack stack m_sym args thread) =
       unravel1 target new_args =
         let nf_new_args_syms = map (map (\arg -> reduce_deep $ sa {
                 sa_sym = Sym arg,
+                sa_is_monadic = False, -- LAW args aren't monadic
                 sa_args = []
               })) new_args
         in (mconcat $ mconcat nf_new_args_syms) {
@@ -341,11 +331,21 @@ reduce_deep sa@(SA consumers locstack stack m_sym args thread) =
                 mempty
              | Just left_syms <- stack `stack_var_lookup` v ->
               mconcat $ map (\sa' ->
-                  reduce_deep sa' { -- TODO: check if `reduce_deep` is actually necessary here; might not be because we expect the symbols in the stack to be resolved
-                    sa_args = sa_args sa' <> args', -- ARGS good: elements in the stack are already processed, so if their args are okay these ones are okay
-                    sa_stack = (sa_stack sa') <> stack
-                    -- NOTE sa_loc isn't changed
-                  }
+                  let next_rs = reduce_deep sa' {
+                          sa_args = sa_args sa' <> args', -- ARGS good: elements in the stack are already processed, so if their args are okay these ones are okay
+                          sa_stack = (sa_stack sa') <> stack
+                        }
+                  in next_rs {
+                      rs_syms = map (\sa' ->
+                          (
+                              if is_monadic
+                                then reloc sa' sa
+                                else sa'
+                            ) {
+                              sa_is_monadic = is_monadic
+                            }
+                        ) (rs_syms next_rs)
+                    }
                 ) left_syms
              | otherwise ->
               ------------------------------------
@@ -359,7 +359,7 @@ reduce_deep sa@(SA consumers locstack stack m_sym args thread) =
                     let next_rs = mconcat $ map (\fun -> reduce_deep fun {
                             sa_args = sa_args fun ++ [v]
                           }) f
-                        next_syms = map (\sa -> sa { sa_loc = StmtFrame : sa_loc sa }) (rs_syms next_rs)
+                        next_syms = map (\sa -> sa { sa_is_monadic = True }) (rs_syms next_rs)
                     in next_rs {
                       rs_syms = next_syms,
                       rs_stmts = rs_stmts next_rs <> next_syms <> v -- TODO including both inputs and outputs in the worst-case will duplicate most statements (e.g. if it's a long chain of `>>` and `>>=`), which ends up polluting the top-level, maybe with an exponential number of terms. However, the base case is non-trivial because if it's just this statement alone, we would need to log both as statements for proper coverage.
@@ -391,7 +391,7 @@ reduce_deep sa@(SA consumers locstack stack m_sym args thread) =
                        "thenSTM"
                      ]
                     , i:o:[] <- args'
-                    , let reduce' = map ((\rs -> rs { rs_syms = map (\sa' -> sa' { sa_loc = StmtFrame : sa_loc sa }) (rs_syms rs) }) . reduce_deep) -- post-reduction tack StmtFrame
+                    , let reduce' = map ((\rs -> rs { rs_syms = map (\sa' -> sa' { sa_is_monadic = True }) (rs_syms rs) }) . reduce_deep)
                           i' = reduce' i
                           o' = reduce' o
                           next_rs = mconcat [i'' { rs_syms = mempty } <> o'' | i'' <- i', o'' <- o']-- combinatorial EXPLOSION! BOOM PEW PEW -- magical monad `*>` == `>>`: take right-hand syms, merge writes
@@ -492,7 +492,7 @@ reduce_deep sa@(SA consumers locstack stack m_sym args thread) =
                 ParStmt _ _ _ _ -> Nothing -- not analyzed for now, because the list comp is too niche (only used for parallel monad comprehensions; see <https://gitlab.haskell.org/ghc/ghc/wikis/monad-comprehensions>)
                 _ -> fail
                 -- fun fact: I thought ParStmt was for "parenthesized", but it's "parallel"
-              m_next_syms = ((\rs -> rs { rs_syms = map (\sa' -> sa' { sa_loc = StmtFrame : sa_loc sa' }) (rs_syms rs) }) . flip unravel1 []) <$> m_next_expr
+              m_next_syms = (reduce_deep . (\expr -> sa { sa_sym = Sym expr, sa_is_monadic = True })) <$> m_next_expr
           in syms { -- combining rule assumes LastStmt is really the last statement every time
             rs_syms = fromMaybe mempty (rs_syms <$> m_next_syms),
             rs_stmts = rs_stmts syms <> fromMaybe mempty ((rs_stmts <$> m_next_syms) <> (rs_syms <$> m_next_syms))

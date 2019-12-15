@@ -45,7 +45,10 @@ ppr_sa show' = go 0 where
                     ) . sa_args
                   &&& uncurry (++) . (
                       show' . make_loc_key
-                      &&& fromMaybe "BASE" . fmap (show' . make_loc_key) . sa_thread
+                      &&& uncurry (++) . (
+                          fromMaybe "BASE" . fmap (show' . make_loc_key) . sa_thread
+                          &&& show . sa_is_monadic
+                        )
                     )
                 )
             )
@@ -102,7 +105,6 @@ ppr_stack show' = foldr (\case
     AppFrame sa syms -> (++("---\n\nAF\n" ++ ppr_table show' syms))
     -- BindFrame syms -> (++("---\n\nBF\n" ++ ppr_table show' syms))
     BindFrame {} -> (++"---\n\nBF\n")
-    StmtFrame {} -> (++"---\n\nSF\n")
     
     _ -> id
   ) ""
