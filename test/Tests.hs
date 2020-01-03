@@ -98,13 +98,23 @@ pipe_tests = testGroup "Pipe tests" [
           expect = tSA "()" []
       in runGhc (Just libdir) $ tc_test pgm (any_result_match or [expect])
     
-    , testCase "Recursive pipe values" $
+    , testCase "Recursive flows of non-recursive pipe values" $
       let pgm = unlines [
               "import Control.Concurrent.MVar",
               "import GHC.Base ( bindIO )",
               "f = do",
               "  a <- newEmptyMVar",
               "  readMVar a `bindIO` putMVar a"
+            ]
+      in runGhc (Just libdir) $ tc_hang_test pgm
+      
+    , testCase "Recursive flows of recursive pipe values" $
+      let pgm = unlines [
+              "import Control.Concurrent.MVar",
+              "import GHC.Base ( bindIO )",
+              "f = do",
+              "  a <- newEmptyMVar",
+              "  readMVar a `bindIO` (\\x -> putMVar a (():x))"
             ]
       in runGhc (Just libdir) $ tc_hang_test pgm
     
