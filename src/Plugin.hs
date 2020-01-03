@@ -53,7 +53,7 @@ module Plugin (frontendPlugin) where
         --     sa_stack = mapSB ((AppFrame (sa_from_sym EntryPoint) (pms_syms initial_pms)): ) (sa_stack sa)
         --   })) syms0 -- this makes it work, but feels verrrrry sketchy modifying stacks like that; it's almost like duplicating and tacking onto this "layer"
         rsn = reduce syms0
-        ppr_final_writes :: Map StackKey [SymApp] -> String
+        ppr_final_writes :: Map StackKey [SymApp Sym] -> String
         ppr_final_writes = concat . intersperse "\n===\n" . map ((
             uncurry ((++) . (++" -> "))
             . (
@@ -62,9 +62,9 @@ module Plugin (frontendPlugin) where
             )
           )) . M.assocs
         
-        final_writes :: Map StackKey [SymApp]
+        final_writes :: Map StackKey [SymApp Sym]
         final_writes = foldr (flip (foldr ($))
-          . uncurry (flip (map . ($))) -- [Map StackKey [SymApp] -> Map StackKey [SymApp]]
+          . uncurry (flip (map . ($))) -- [Map StackKey [SymApp Sym] -> Map StackKey [SymApp Sym]]
           . (
             map (\sa -> case sa_sym sa of
                 Sym (L _ (HsVar _ (L _ v))) | varString v == "newEmptyMVar" -> Just $ make_loc_key sa
@@ -73,7 +73,7 @@ module Plugin (frontendPlugin) where
             *** (\v m_k -> case m_k of
                 Just k -> insertWith (++) k v
                 Nothing -> id
-              ) -- [StackKey -> Map StackKey [SymApp] -> Map StackKey [SymApp]]
+              ) -- [StackKey -> Map StackKey [SymApp Sym] -> Map StackKey [SymApp Sym]]
             -- map (((fromMaybe id).) . fmap . flip insert) -- sometimes pointfree isn't worth it
           )) mempty (concatMap rs_writes rsn)
     

@@ -17,7 +17,7 @@ import Ra.Lang
 import Ra.Extra
 import Ra.GHC.Util ( varString )
 
-mk_write :: SymApp -> Maybe Write
+mk_write :: SymApp Sym -> Maybe Write
 mk_write sa | Sym (L _ (HsVar _ (L _ v))) <- sa_sym sa =
               if | varString v `elem` [
                     "writeIORef",
@@ -56,7 +56,7 @@ mk_write sa | Sym (L _ (HsVar _ (L _ v))) <- sa_sym sa =
              | otherwise = mempty
 
 
-refresh_frames :: Writes -> SymApp -> (PatMatchSyms, SymApp)
+refresh_frames :: Writes -> SymApp Sym -> (PatMatchSyms, SymApp Sym)
 refresh_frames ws sa =
   let (next_pms, next_stack) =
         first mconcat $ unzip $ map (\frame ->
@@ -83,7 +83,7 @@ refresh_frames ws sa =
           ) (sa_stack sa) -- DEBUG
   in (next_pms, sa { sa_stack = next_stack })
 
-unref :: Writes -> SymApp -> [SymApp]
+unref :: Writes -> SymApp Sym -> [SymApp Sym]
 unref ws sa =
   let bases = snd $ foldl (\(max_len, sas) (pipes, next_sas) ->
           let m_next_max_len = foldr (\pipe ->
@@ -109,36 +109,41 @@ unref ws sa =
     }) bases
 
 
-type WriteSite = (Stack, Stack) -- pipe and value locations
-
 permute2 = concatMap (\(pipes, syms) -> [(pipe, sym) | pipe <- pipes, sym <- syms]) -- TODO stopgap before implementing Map
 
-reduce :: [SymApp] -> ReduceSyms
+reduce :: [SymApp Sym] -> ReduceSyms
 reduce sas0 =
   let syms0 = mconcat $ map reduce_deep sas0
   
+      f0 :: Monoid m => forall a. a -> (m, a)
       f0 = (mempty,)
       
       go :: [Write] -> GenericQT (Bool, [DoStmt])
-      go writes = first ((or *** mconcat) . unzip) . (
-          gmapQT (go writes)
-          `extQT` ( -- TODO there's some canonical way to do this non-imperatively. even with Bool not sharing classes with []. find it.
-              ( -- ehh.
-                  first pure -- eh.
-                  . first (second (uncurry (<>)) . fpackl packr) . fpackr packl . second ((rs_stmts &&& rs_syms) . mconcat . map reduce_deep)
-                  . fpackr packl . first (uncurry (||)) . fpackr packl -- ((Bool, [DoStmt]), [SymApp])
-                  . second (
-                      fpackl packr . first ((or *** mconcat) . unzip)  -- (Bool, ([DoStmt], [SymApp]))
-                      . gmapQT (go writes) -- ([(Bool, [DoStmt])], [SymApp])
-                    )
-                  . (or *** concatMap (uncurry list_alt) . uncurry zip) -- (Bool, [SymApp])
-                  . fpackl packr -- ([Bool], ([[SymApp]], [[SymApp]]))
-                  . (unzip . map ((not . null &&& id) . expand_reads writes) &&& map pure) -- (([Bool], [[SymApp]]), [[SymApp]])
-                )
-            )
-          `extQT` ((\fr -> case fr of { BindFrame {} -> f0 fr; _ -> gmapQT (go writes) fr }) :: StackFrame -> ([(Bool, [DoStmt])], StackFrame))
-        )
-      
+      go = go' 0 where
+        go' :: Int -> [Write] -> GenericQT (Bool, [DoStmt])
+        go' n writes
+          | n < sum (map (length . fst) writes) + 1 =
+            first ((or *** mconcat) . unzip) . (
+                gmapQT (go' n writes)
+                `extQT` ( -- TODO there's some canonical way to do this non-imperatively. even with Bool not sharing classes with []. find it.
+                    ( -- ehh.
+                        first pure -- eh.
+                        . first (second (uncurry (<>)) . fpackl packr) . fpackr packl . second ((rs_stmts &&& rs_syms) . mconcat . map reduce_deep)
+                        . fpackr packl . first (uncurry (||)) . fpackr packl -- ((Bool, [DoStmt]), [SymApp Sym])
+                        . second (
+                            fpackl packr . first ((or *** mconcat) . unzip . concat)  -- (Bool, ([DoStmt], [SymApp Sym]))
+                            . unzip
+                            . map (gmapQT (go' (n + 1) writes)) -- [([(Bool, [DoStmt])], SymApp Sym)]
+                          )
+                        . (or *** concatMap (uncurry list_alt) . uncurry zip) -- (Bool, [SymApp Sym])
+                        . fpackl packr -- ([Bool], ([[SymApp Sym]], [[SymApp Sym]]))
+                        . (unzip . map ((not . null &&& id) . expand_reads writes) &&& map pure) -- (([Bool], [[SymApp Sym]]), [[SymApp Sym]])
+                      )
+                  )
+                `extQT` (f0 :: StackFrame -> ([(Bool, [DoStmt])], StackFrame)) -- _ -> gmapQT (go writes) fr }) :: StackFrame -> ([(Bool, [DoStmt])], StackFrame))
+              )
+          | otherwise = ((False, []),)
+          
       iterant :: [DoStmt] -> [DoStmt] -> (Writes, ([DoStmt], [DoStmt])) -- always act on syms0, return what we get on this phase
       iterant old_stmts new_stmts =
         let (old_writes, new_writes) = both (catMaybes . map mk_write) (old_stmts, new_stmts)
@@ -174,45 +179,42 @@ in if sa_loc sa `elem` map fst reads && sa_loc sa' `elem` map snd reads
   else ([(sa_loc sa, sa_loc sa')], nf_sas)
 -}
 
-expand_reads :: [Write] -> SymApp -> [SymApp]
-expand_reads = expand_reads' 0 where
-  expand_reads' n ws sa
-    | n < sum (map (length . fst) ws) = -- reeeeeeeally crude upper bound for now
-      let next_read_syms
-            | arg0:rest <- sa_args sa = mconcat $ map (\sa' ->
-                case sa_sym sa' of
-                  Sym (L _ (HsVar _ (L _ v')))
-                    | varString v' `elem` [
-                        "newMVar", -- DEBUG
-                        "newEmptyMVar",
-                        "newTVar",
-                        "newTVarIO",
-                        "newIORef",
-                        "newSTRef"
-                      ] -> concatMap (uncurry list_alt) $ map ((expand_reads' (n + 1) ws) &&& pure) $ unref ws (sa' { sa_args = rest })
-                    | otherwise -> []
-              ) arg0
-            | otherwise = []
-      in case sa_sym sa of
-        Sym (L _ (HsVar _ (L _ v))) ->
-          if | varString v `elem` [
-                "readIORef",
-                "readMVar",
-                "takeMVar",
-                "readTVar",
-                "readTVarIO",
-                "readSTRef",
-                
-                "atomicSwapIORef"
-              ]
-             -> snd (sa, next_read_syms) -- DEBUG
-             
-             | varString v == "atomicModifyIORefLazy_"
-             -> map (\sa -> sa {
-                sa_sym = TupleConstr (getSymLoc $ sa_sym sa),
-                sa_args = [[sa], [sa]]
-              }) next_read_syms
-             
-             | otherwise -> []
-        _ -> []
-    | otherwise = []
+expand_reads :: [Write] -> SymApp Sym -> [SymApp Sym]
+expand_reads ws sa =
+  let next_read_syms
+        | arg0:rest <- sa_args sa = mconcat $ map (\sa' ->
+            case sa_sym sa' of
+              Sym (L _ (HsVar _ (L _ v')))
+                | varString v' `elem` [
+                    "newMVar", -- DEBUG
+                    "newEmptyMVar",
+                    "newTVar",
+                    "newTVarIO",
+                    "newIORef",
+                    "newSTRef"
+                  ] -> unref ws (sa' { sa_args = rest })
+                | otherwise -> []
+          ) arg0
+        | otherwise = []
+  in case sa_sym sa of
+    Sym (L _ (HsVar _ (L _ v))) ->
+      if | varString v `elem` [
+            "readIORef",
+            "readMVar",
+            "takeMVar",
+            "readTVar",
+            "readTVarIO",
+            "readSTRef",
+            
+            "atomicSwapIORef"
+          ]
+         -> snd (sa, next_read_syms) -- DEBUG
+         
+         | varString v == "atomicModifyIORefLazy_"
+         -> map (\sa -> sa {
+            sa_sym = TupleConstr (getSymLoc $ sa_sym sa),
+            sa_args = [[sa], [sa]]
+          }) next_read_syms
+         
+         | otherwise -> []
+    _ -> []
