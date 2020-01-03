@@ -135,7 +135,7 @@ reduce sas0 =
                   . (unzip . map ((not . null &&& id) . expand_reads writes) &&& map pure) -- (([Bool], [[SymApp Sym]]), [[SymApp Sym]])
                 )
             )
-          `extQT` ((\fr -> case fr of { BindFrame {} -> f0 fr; _ -> gmapQT (go writes) fr }) :: StackFrame -> ([(Bool, [DoStmt])], StackFrame))
+          `extQT` ((\fr -> case fr of { _ -> f0 fr; }) :: StackFrame -> ([(Bool, [DoStmt])], StackFrame)) -- _ -> gmapQT (go writes) fr }) :: StackFrame -> ([(Bool, [DoStmt])], StackFrame))
         )
       
       iterant :: [DoStmt] -> [DoStmt] -> (Writes, ([DoStmt], [DoStmt])) -- always act on syms0, return what we get on this phase

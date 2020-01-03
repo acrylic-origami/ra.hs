@@ -1,19 +1,20 @@
 module V where
 -- import qualified Rg
+-- import C.Union
+import qualified W
+import Control.Monad.ST
+import Data.STRef
 -- import qualified W
--- import qualified W
 
--- foo = Rg.scan const (0 :: Int) (const (return True)) <*> (return 2 :: IO Int)
--- foo :: IO Integer
--- foo = return id <*> return 0
--- bar :: IO Integer
--- bar = return 1 >>= return
--- import qualified InstMonadIO
--- import qualified C.GHC.Base
-import C.Union
+type C a = a -> IO Bool
+type OState m a b = C b -> m (C a)
+scan :: (a -> b -> b) -> b -> OState IO a b
+scan f init down = stToIO $ do
+  init' <- newSTRef init
+  return $ \v -> stToIO (modifySTRef init' (f v) >> readSTRef init') >>= down
 
-
-baz :: IO Integer
-baz = return 2 >> return 42
-
--- foo :: 
+c :: C a
+c x = pure True
+v :: IO Int
+v = pure 2
+foo = scan const (0 :: Int) c <*> v
