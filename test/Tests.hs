@@ -85,7 +85,29 @@ pipe_tests = testGroup "Pipe tests" [
             ]
           expect = tSA "()" []
       in runGhc (Just libdir) $ tc_test pgm (any_result_match or [expect])
-      
+    
+    , testCase "Closure value dependencies" $
+      let pgm = unlines [
+              "import Control.Concurrent.MVar",
+              "import GHC.Base ( returnIO )",
+              "f = do",
+              "  a <- newEmptyMVar",
+              "  putMVar a ()",
+              "  (\\_ -> do { v <- readMVar a; putMVar a v; returnIO v }) ()"
+            ]
+          expect = tSA "()" []
+      in runGhc (Just libdir) $ tc_test pgm (any_result_match or [expect])
+    
+    , testCase "Recursive pipe values" $
+      let pgm = unlines [
+              "import Control.Concurrent.MVar",
+              "import GHC.Base ( bindIO )",
+              "f = do",
+              "  a <- newEmptyMVar",
+              "  readMVar a `bindIO` putMVar a"
+            ]
+      in runGhc (Just libdir) $ tc_hang_test pgm
+    
     , testCase "Fan-in and fan-out" $
       let pgm = unlines [
               "import Control.Concurrent.MVar",

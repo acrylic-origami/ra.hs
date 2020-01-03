@@ -126,8 +126,9 @@ reduce sas0 =
                   . first (second (uncurry (<>)) . fpackl packr) . fpackr packl . second ((rs_stmts &&& rs_syms) . mconcat . map reduce_deep)
                   . fpackr packl . first (uncurry (||)) . fpackr packl -- ((Bool, [DoStmt]), [SymApp Sym])
                   . second (
-                      fpackl packr . first ((or *** mconcat) . unzip)  -- (Bool, ([DoStmt], [SymApp Sym]))
-                      . gmapQT (go writes) -- ([(Bool, [DoStmt])], [SymApp Sym])
+                      fpackl packr . first ((or *** mconcat) . unzip . concat)  -- (Bool, ([DoStmt], [SymApp Sym]))
+                      . unzip
+                      . map (gmapQT (go writes)) -- [([(Bool, [DoStmt])], SymApp Sym)]
                     )
                   . (or *** concatMap (uncurry list_alt) . uncurry zip) -- (Bool, [SymApp Sym])
                   . fpackl packr -- ([Bool], ([[SymApp Sym]], [[SymApp Sym]]))
