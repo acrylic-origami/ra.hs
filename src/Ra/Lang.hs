@@ -205,11 +205,11 @@ data PatMatchSyms = PatMatchSyms {
 } deriving (Data, Typeable)
 
 data ReduceSyms = ReduceSyms {
-  rs_syms :: [SymApp],
+  rs_syms :: [SymApp Sym],
   rs_stmts :: [DoStmt]
 } deriving (Data, Typeable)
 
-lift_rs_syms2 :: ([SymApp] -> [SymApp] -> [SymApp]) -> ReduceSyms -> ReduceSyms -> ReduceSyms
+lift_rs_syms2 :: ([SymApp Sym] -> [SymApp Sym] -> [SymApp Sym]) -> ReduceSyms -> ReduceSyms -> ReduceSyms
 lift_rs_syms2 f a b = (a <> b) {
   rs_syms = f (rs_syms a) (rs_syms b)
 }
@@ -258,7 +258,7 @@ stack_eq = curry $ uncurry (&&) . (
 
 is_parent = curry $ (\(p, q) -> take (length q) p `stack_eq` q) . both stack_apps
 
-is_visited :: Stack -> SymApp -> Bool
+is_visited :: Stack -> SymApp Sym -> Bool
 is_visited sb sa = any (\case
     AppFrame { af_raw } -> (sa_sym af_raw) == (sa_sym sa)
     _ -> False
