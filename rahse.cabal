@@ -4,6 +4,11 @@
 name:                rahse
 version:             0.1.0.0
 synopsis:            Race condition linter for reactive codebases
+data-files:          purebase/base/C/*.hs, purebase/base/C/System/Posix/*.hs, purebase/base/C/GHC/*.hs, purebase/base/C/GHC/IO/*.hs, purebase/base/C/Data/Functor/*.hs, purebase/base/C/Data/STRef/*.hs, purebase/base/C/Data/*.hs, purebase/base/C/Data/List/*.hs, purebase/base/C/Data/Semigroup/*.hs, purebase/base/C/Foreign/C/*.hs, purebase/base/C/Control/*.hs, purebase/base/C/Control/Concurrent/*.hs, purebase/base/C/Control/Monad/*.hs, purebase/base/C/Control/Monad/ST/*.hs, purebase/base/C/Control/Monad/ST/Lazy/*.hs
+                     , purebase/hiddens/Data/Functor/*.hs, purebase/hiddens/Data/Semigroup/*.hs, purebase/hiddens/Data/*.hs, purebase/hiddens/Control/Concurrent/*.hs, purebase/hiddens/Control/Monad/ST/*.hs, purebase/hiddens/Control/Monad/ST/Lazy/*.hs
+                     , purebase/base/C/GHC/*.hs-boot, purebase/base/C/GHC/*.hs-boot, purebase/base/C/Data/Semigroup/*.hs-boot, purebase/hiddens/Data/Semigroup/*.hs-boot
+                     , purebase/insts/*.hs
+                     , purebase/purebase.cabal
 -- description:         
 homepage:            https://lam.io/projects
 license:             MIT
@@ -17,22 +22,20 @@ extra-source-files:  ChangeLog.md
 cabal-version:       >=1.10
 
 executable rahse-exec
-  main-is:				  Main.hs
-  other-modules:       Ra, Ra.Impure Ra.GHC.Translate, Ra.GHC.Util, Ra.Refs, Ra.Lang, Ra.Lang.Extra, Ra.Extra
-  -- other-extensions:    
-  build-depends:       base, ghc >= 8.2.2, ghc-paths >= 0.1.0.9, syb >= 0.7, bytestring, containers, fgl, syb-extra
-  hs-source-dirs:      src, standalone, purebase/hiddens, purebase/insts, purebase/base
+  main-is:				     Main.hs
+  build-depends:       rahse, base, ghc >= 8.2.2, ghc-paths >= 0.1.0.9, syb >= 0.7, bytestring, containers, fgl, syb-extra
+  hs-source-dirs:      src, standalone, target, purebase/hiddens, purebase/insts, purebase/base
   default-language:    Haskell2010
-
+  ghc-options: -itarget
 
 library
-  exposed-modules:     Ra, Ra.Impure, Ra.GHC.Translate, Ra.GHC.Util, Ra.Refs, Ra.Lang, Ra.Lang.Extra, Ra.Extra
-  -- other-extensions:    
+  exposed-modules:     Ra, Ra.Plugin, Ra.Impure, Ra.GHC.Translate, Ra.GHC.Util, Ra.Refs, Ra.Lang, Ra.Lang.Extra, Ra.Extra
+  other-modules:       Ra.Plugin.CallGraph, Paths_rahse
   build-depends:       base, ghc >= 8.2.2, ghc-paths >= 0.1.0.9, syb >= 0.7, bytestring, containers, syb-extra, fgl
-  hs-source-dirs:      src
+  hs-source-dirs:      src, target
   default-language:    Haskell2010
   
-executable tests
+executable rahse-tests
   -- type: exitcode-stdio-1.0
   main-is: Tests.hs
   other-modules: Test.Util.Lang, Test.Util.Predicate, Test.Util.Typecheck
