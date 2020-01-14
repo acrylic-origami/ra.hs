@@ -21,3 +21,5 @@ Things I'm not supporting in v1:
 	- For lack of understanding their exact semantics. How does this interact with the `fork` code?
 - Type families or `cast`, i.e. type-driven logic
 	- Could vastly reduce our specificity: imagine a result from `everything` that just picks up... everything.
+- RecursiveDo
+	- To great benefit to simplicity, the recursion detection engine assumes that within `do`, variables don't refer to each other outside of `let` recursive/mutual bindings
