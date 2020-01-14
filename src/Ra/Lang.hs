@@ -44,8 +44,9 @@ module Ra.Lang (
 
 import GHC
 import Var ( varName, varType, setVarType )
-import Type ( mkFunTys, mkAppTy, mkAppTys, getTyVar_maybe, dropForAlls )
+import Type ( mkFunTys, mkAppTy, mkAppTys, getTyVar_maybe, dropForAlls, mkStrLitTy )
 import TyCon ( tyConName )
+import FastString ( fsLit )
 
 -- for WildPat synthesis
 import Type ( eqType )
@@ -172,8 +173,8 @@ get_sa_type sa =
   case sa_sym sa of
     Sym expr -> get_expr_type expr
     TupleConstr _ -> mkAppTys (error "Report this bug: too lazy to make actual Tuple TyCon.") (map (get_sa_type . head) (sa_args sa))
-    ListConstr _ -> mkAppTy (error "Report this bug: too lazy to make actual list TyCon.") (get_sa_type $ head $ head $ sa_args sa)
-    EntryPoint -> error "Tried to get the type of EntryPoint"
+    ListConstr _ -> mkStrLitTy $ fsLit "[]" -- mkAppTy (error "Report this bug: too lazy to make actual list TyCon.") (get_sa_type $ head $ head $ sa_args sa)
+    EntryPoint -> mkStrLitTy $ fsLit "EntryPoint"
 
 sub_types_T :: Map Id Type -> GenericT
 sub_types_T type_map = mkT (uncurry fromMaybe . (id &&& join . fmap (type_map!?) . getTyVar_maybe))
@@ -347,9 +348,6 @@ stack_apps = filter (\case { AppFrame {} -> True; _ -> False })
 soft_table_lookup :: Lookup
 soft_table_lookup tbl v = listToMaybe $ catMaybes $ map (\(v', sa) -> -- DUBIOUS listToMaybe: restricting to first result
     if | varString v == varString v'
-       , varString v == "ap"
-       -> flip sub_types_T sa <$> inst_subty (varType v') (varType v)
-       | varString v == varString v'
        -> flip sub_types_T sa <$> inst_subty (varType v') (varType v)
        | otherwise ->  Nothing
   ) $ assocs tbl

@@ -537,6 +537,8 @@ reduce_deep sa@(SA consumers is_monadic locstack stack m_sym args thread) =
           sa_args = args'
         })
       ExplicitList _ (Just _) _ -> error "List comprehensions not yet supported"
+      RecordUpd {} -> terminal
+      RecordCon {} -> terminal -- see unsupported for v1
       -- ExplicitPArr _ _ -> terminal
       _ -> error ("Incomplete coverage of HsExpr rules: encountered " ++ (show $ toConstr $ unLoc sym))
     _ -> terminal
