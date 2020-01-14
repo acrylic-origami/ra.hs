@@ -191,10 +191,10 @@ inst_subty a b =
       masum = foldrM (flip (fmap . union) . uncurry inst_subty) mempty
   in snd ((a, b, a', b', m_app_con_a, m_app_tys_a, m_app_con_b, m_app_tys_b, fun_tys_a, fun_tys_b),
       if | not $ null fun_tys_a -> -- function type matching
-          if length fun_tys_a < length fun_tys_b
-            then Nothing
+          if length fun_tys_b < length fun_tys_a
+            then Nothing -- candidate function doesn't necessarily return function (unless it's `forall`; TODO)
             else
-              union <$> inst_subty a' (mkFunTys (drop (length fun_tys_a) fun_tys_b) b') -- allow the possibility that the last term of `a` captures a return function from `b`: i.e. `a` matches `a -> b`
+              union <$> inst_subty a' (mkFunTys (drop (length fun_tys_a) fun_tys_b) b') -- allow the possibility that the last term of `a` captures a return function from `b`: i.e. `a :: c` matches `b :: d -> e`
               <*> masum (zip fun_tys_a fun_tys_b)
          | Just (tycon_a, tyargs_a) <- splitTyConApp_maybe a -- `a` is a true TyCon
          -> case splitTyConApp_maybe b of
