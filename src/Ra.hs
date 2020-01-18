@@ -88,7 +88,8 @@ pat_match_one pat sa =
     -------------------------------
     -- +++ MATCHING PATTERNS +++ --
     -------------------------------
-    TuplePat _ pats _ | TupleConstr _ <- sa_sym sa -> and_pat_match_many (zip pats (sa_args sa))
+    TuplePat _ pats _ | EntryPoint <- sa_sym sa -> and_pat_match_many (zip pats (repeat [sa_from_sym EntryPoint]))
+                      | TupleConstr _ <- sa_sym sa -> and_pat_match_many (zip pats (sa_args sa))
                       | otherwise -> mempty -- error $ "Argument on explicit tuple. Perhaps a tuple section, which isn't supported yet. PPR:\n" ++ (ppr_sa ppr_unsafe sa)
                       
     ConPatOut { pat_con, pat_args = d_pat_args } -> case unLoc pat_con of
@@ -101,7 +102,12 @@ pat_match_one pat sa =
                           sa_args = []
                         }]) args'') ++ sa_args sa) -- STACK good: this decomposition is not a function application so the stack stays the same
                             -- NOTE this is the distributivity of `consumers` onto subdata of a datatype, as well as the stack
-                              in and_pat_match_many (zip pats flat_args)
+                              in if null pats || null flat_args
+                                then Just mempty
+                                else and_pat_match_many (zip pats flat_args)
+                       | EntryPoint <- sa_sym sa -> if null pats
+                        then Just mempty
+                        else and_pat_match_many (zip pats (repeat [sa_from_sym EntryPoint]))
                        | otherwise -> Nothing
       
         InfixCon l r -> if ":" == (occNameString $ nameOccName $ dataConName pat_con')
@@ -109,6 +115,7 @@ pat_match_one pat sa =
             ListConstr _ -> if length (sa_args sa) > 0
               then (or_pat_match_many (zip (repeat l) (sa_args sa))) <> (pat_match_one r sa) -- `or` here because any member of the list can work -- `union` mechanics are fine here because the bound names can't be shared between head and tail
               else Nothing
+            EntryPoint -> pat_match_one l (sa_from_sym EntryPoint)
             _ -> Nothing
           else pat_match_one
             ((\pat' -> pat' {
