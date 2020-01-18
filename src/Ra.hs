@@ -284,39 +284,45 @@ reduce_deep sa@(SA consumers is_monadic locstack stack m_sym args thread) =
       -- +++ NON-TRIVIAL EXPRS +++ --
       -------------------------------
       
-      HsLamCase _ mg -> unravel1 (HsLam NoExt mg <$ sym) []
-      
       HsLam _ mg | is_visited stack sa -> mempty
                  | matchGroupArity mg <= length args 
-                 , let next_arg_binds = concatMap ( flip zip (sa_args sa) . m_pats . unLoc ) (unLoc $ mg_alts mg)
-                 , Just next_arg_matches <- if length next_arg_binds > 0
-                    then and_pat_match_many next_arg_binds -- `and` here because we need to stop evaluating if this alternative doesn't match the input
-                    else Just mempty -- NOTE no recursive pattern matching needed here because argument patterns are purely deconstructive and can't refer to the new bindings the others make
-                 -> let next_af = AppFrame sa (SymTable {
-                            stbl_table = next_arg_matches,
-                            stbl_binds = next_arg_binds
-                          })
-                        next_exprs = everywhereBut (False `mkQ` (const True :: Stack -> Bool)) (sub_sa_types_T sa) -- TODO URGENT check if removing the Var special case and letting `sub_sa_types_T` handle it here was the right thing to do
-                          $ grhs_exprs $ map (grhssGRHSs . m_grhss . unLoc) $ unLoc $ mg_alts mg -- TEMP
-                        bind_pms = pat_match $ map (second (map (\sa' -> sa' {
-                            sa_stack = sa_stack sa' ++ (next_af : stack),
-                            sa_loc = sa_loc sa' ++ (next_af : locstack)
-                          }))) $ (grhs_binds True) mg -- STACK questionable: do we need the new symbol here? Shouldn't it be  -- localize binds correctly via pushing next stack location
-                        next_frames = [BindFrame (pms_syms bind_pms), next_af]
-                        next_stack = (next_frames++) stack
-                        next_loc = (next_frames++) locstack
-                        next_args = drop (matchGroupArity mg) args
-                    in mempty {
-                      rs_stmts = pms_stmts bind_pms
-                    }
-                      <> (mconcat $ map (\next_expr ->
-                          reduce_deep sa {
-                            sa_loc = next_loc,
-                            sa_stack = next_stack,
-                            sa_sym = Sym next_expr,
-                            sa_args = next_args
-                          }
-                        ) next_exprs) -- TODO check if the sym record update + args are correct for this stage
+                 , let alts = unLoc $ mg_alts mg
+                       next_arg_binds_per_alt = map ( flip zip (sa_args sa) . m_pats . unLoc ) alts -- :: [[Bind]]
+                 , next_arg_matches_per_alt@(_:_) <- catMaybes
+                  $ map (uncurry (fmap . (,)))
+                  $ zip alts
+                  $ map (\alt_binds ->
+                    if length alt_binds > 0
+                      then and_pat_match_many alt_binds -- `and` here because we need to stop evaluating if this alternative doesn't match the input
+                      else Just mempty -- NOTE no recursive pattern matching needed here because argument patterns are purely deconstructive and can't refer to the new bindings the others make
+                  ) next_arg_binds_per_alt -- :: [(Alt, LUT)]
+                 -> mconcat $ map (\(alt, lut) -> 
+                      let next_af = AppFrame sa (SymTable {
+                              stbl_table = lut,
+                              stbl_binds = concat next_arg_binds_per_alt
+                            })
+                          next_exprs = everywhereBut (False `mkQ` (const True :: Stack -> Bool)) (sub_sa_types_T sa) -- TODO URGENT check if removing the Var special case and letting `sub_sa_types_T` handle it here was the right thing to do
+                            $ grhs_exprs $ grhssGRHSs $ m_grhss $ unLoc alt
+                          bind_pms = pat_match $ map (second (map (\sa' -> sa' {
+                              sa_stack = sa_stack sa' ++ (next_af : stack),
+                              sa_loc = sa_loc sa' ++ (next_af : locstack)
+                            }))) $ (grhs_binds True) mg -- STACK questionable: do we need the new symbol here? Shouldn't it be  -- localize binds correctly via pushing next stack location
+                          next_frames = [BindFrame (pms_syms bind_pms), next_af]
+                          next_stack = (next_frames++) stack
+                          next_loc = (next_frames++) locstack
+                          next_args = drop (matchGroupArity mg) args
+                      in mempty {
+                          rs_stmts = pms_stmts bind_pms
+                        }
+                        <> (mconcat $ map (\next_expr ->
+                            reduce_deep sa {
+                              sa_loc = next_loc,
+                              sa_stack = next_stack,
+                              sa_sym = Sym next_expr,
+                              sa_args = next_args
+                            }
+                          ) next_exprs) -- TODO check if the sym record update + args are correct for this stage
+                    ) next_arg_matches_per_alt
                  | otherwise -> terminal
             
       HsVar _ (L _ v) ->
@@ -469,6 +475,7 @@ reduce_deep sa@(SA consumers is_monadic locstack stack m_sym args thread) =
                             Nothing -> terminal
                         | otherwise -> terminal -- error ("Unsaturated (i.e. partial) SectionR is not yet supported, at:\n  " ++ (show $ getLoc sym)) -- softening the error a bit, but this is still invalid
           
+      HsLamCase _ mg -> unravel1 (HsLam NoExt mg <$ sym) []
       HsCase _ x mg -> unravel1 (noLoc $ HsApp NoExt (HsLam NoExt mg <$ mg_alts mg) x) [] -- refactor as HsLam so we can just use that pat match code
       HsIf _ _ if_ then_ else_ -> unravel1 then_ [] <> unravel1 else_ []
       HsMultiIf ty rhss ->
