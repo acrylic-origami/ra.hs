@@ -1,0 +1,57 @@
+body {
+	margin:1em;
+	font-family:Helvetica, sans-serif;
+}
+
+
+#main_nav > * {
+	vertical-align:middle;
+}
+#main_nav {
+	padding:0.3em 1em;
+	margin-bottom:1em;
+}
+	.flat-list {
+		list-style-type:none;
+		padding:0;
+		margin:0;
+		display:inline-block;
+	}
+		.flat-list > li {
+			display:inline;
+		}
+		#main_nav .flat-list {
+			margin-left:1em;
+		}
+		#main_nav .flat-list > li {
+			border-color:#333;
+			border-width:1px;
+			border-style:none solid;
+			padding:0.5em 1em;
+		}
+
+	.logo {
+		background-image:url(../img/isometric_black_bordered.png);
+		background-repeat:no-repeat;
+		background-size:contain;
+		vertical-align:middle;
+		width:2.5em;
+		height:3.6em;
+		display:inline-block;
+	}
+
+.input-button {
+	cursor:pointer;
+}
+.input-button, .input-button:hover:disabled {
+	padding:1em;
+	border:none;
+	outline:none;
+	background-color:#FFF;
+	border:#555 solid 1px;
+	color:#555;
+}
+#input_container .input-button:hover {
+	background-color:#EEE;
+	color:#000;
+}

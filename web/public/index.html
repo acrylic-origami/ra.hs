@@ -1,0 +1,46 @@
+<html>
+	<head>
+		<script>
+			function symprint([symstr, args]) {
+				return `<span title="${symstr[0]}">${symstr[1]}</span>${args.length > 0 ? ' ' : ''}${ args.map(arg => `(${symprint(arg)})`).join(' ') }`; // arg[1].length <= 1 ? symprint(arg) : 
+			}
+			window.addEventListener('load', _ => {
+				document.getElementById('main_form').addEventListener('submit', e => {
+					e.preventDefault();
+					e.stopPropagation();
+					
+					fetch(e.target.action, { method: 'POST', body: e.target.pgm.value }).then(r => {
+						if(r.status >= 400) throw r.text();
+						else return r.json();
+					}).then(([rs_syms, rs_stmts]) => {
+						// loc = String
+						// symstr = (stack:[loc], String)
+						// sym = (symstr, args:[sym])
+						// syms' -> [sym'] -> [[arg_opt:sym]]
+						
+						// console.log(rs_syms)
+						document.getElementById('results').innerHTML = `<div class="a">${rs_syms.map(sym_ => sym_.map(arg_opt => symprint(arg_opt)).join('</div>\n<div class="b">')).join('</div>\n<div class="a">')}</div>`;
+					}).catch(e_ => e_.then(e => { document.getElementById('results').innerHTML = e; }))
+				})
+			})
+		</script>
+		<link rel="stylesheet" href="css/main.css">
+	</head>
+	<body>
+		<div id="main">
+			<form action="/f" method="POST" id="main_form">
+				<nav id="main_nav">
+					<a href="https://lam.io" target="_blank"><div class="logo"></div></a>
+					<ul class="flat-list">
+						<li>Ra.hs symbolic analysis engine</li><li><a href="https://github.com/acrylic-origami/ra.hs" target="_blank">Github: code &amp; details</a></li>
+					</ul>
+				</nav>
+				<!-- <h1>Ra.hs symbolic analysis engine</h1> -->
+				<p>Enter Haskell source below. Source may only depend on Prelude.</p>
+				<textarea name="pgm" id="pgm" cols="30" rows="10"></textarea>
+				<button className="input-button">Submit</button>
+				<div><code id="results"></code></div>
+			</form>
+		</div>
+	</body>
+</html>

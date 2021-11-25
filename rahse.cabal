@@ -35,6 +35,23 @@ library
   hs-source-dirs:      src, target
   default-language:    Haskell2010
   
+executable rahse-server
+  main-is:             Main.hs
+  build-depends:
+    base,
+    ghc,
+    ghc-paths,
+    rahse,
+    happstack-server==7.5.4,
+    utf8-string,
+    bytestring,
+    filepath,
+    directory,
+    aeson,
+    containers
+  hs-source-dirs:      server
+  default-language: Haskell2010
+  
 executable rahse-tests
   -- type: exitcode-stdio-1.0
   main-is: Tests.hs

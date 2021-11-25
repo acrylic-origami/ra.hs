@@ -1,4 +1,4 @@
-{-# LANGUAGE Rank2Types, LambdaCase, NamedFieldPuns #-}
+{-# LANGUAGE Rank2Types, LambdaCase, NamedFieldPuns, DeriveFunctor #-}
 
 module Ra.Lang.Extra (
   ppr_unsafe,
@@ -7,8 +7,10 @@ module Ra.Lang.Extra (
   ppr_pms,
   ppr_stack,
   ppr_table,
-  ppr_binds
+  ppr_binds,
   -- ppr_writes
+  tree_sa,
+  Tree2(..)
 ) where
 
 import GHC ( LHsExpr, GhcTc )
@@ -16,6 +18,7 @@ import Data.List ( intersperse )
 import Data.Bool ( bool )
 import Data.Maybe ( fromMaybe )
 import Control.Arrow ( (&&&), (***) )
+import Data.Tree ( Tree(..), Forest )
 
 import Ra.Lang
 
@@ -24,6 +27,16 @@ import Data.Map.Strict ( assocs )
 import qualified Data.Map.Strict as M ( map, elems, assocs )
 
 type Printer = (forall o. Outputable o => o -> String)
+
+newtype Tree2 a = Tree2 (a, [[Tree2 a]]) deriving Functor
+
+tree_sa :: Printer -> SymApp Sym -> Tree2 (StackKey, String)
+tree_sa show' = go 0 where
+  go :: Int -> SymApp Sym -> Tree2 (StackKey, String)
+  go n = Tree2 . (
+      (make_loc_key &&& show' . sa_sym) &&&
+      map (map (go (n+1))) . sa_args
+    )
 
 ppr_sa :: Printer -> SymApp Sym -> String
 ppr_sa show' = go 0 where
