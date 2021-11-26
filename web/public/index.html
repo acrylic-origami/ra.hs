@@ -1,46 +1,115 @@
 <html>
 	<head>
+		<script type="text/javascript" src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.64.0/codemirror.min.js"></script>
+		<script type="text/javascript" src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.64.0/mode/haskell/haskell.min.js"></script>
 		<script>
 			function symprint([symstr, args]) {
 				return `<span title="${symstr[0]}">${symstr[1]}</span>${args.length > 0 ? ' ' : ''}${ args.map(arg => `(${symprint(arg)})`).join(' ') }`; // arg[1].length <= 1 ? symprint(arg) : 
 			}
+			const SNIPS = [
+				["Top-level function recursion","f x = f x\ng = f ()\nh = f f"],
+				["Top-level value recursion","f = f"],
+				["`fix`-like recursion","f g = let x = g x in x\nh = f (\\x -> x)"],
+				["Value recursion in let","f =\n  let g = h\n      h = g\n  in (g, h)"],
+				["Pat-match-driven recursion","f =\n  let (g, h) = (h, g)\n  in (g, h)"],
+				["Simple pipe","import Control.Concurrent.MVar\nf = do\n  v <- newEmptyMVar\n  putMVar v ()\n  readMVar v"],
+				["Closure value dependencies","import Control.Concurrent.MVar\nimport GHC.Base ( returnIO )\nf = do\n  a <- newEmptyMVar\n  putMVar a ()\n  (\\_ -> do { v <- readMVar a; putMVar a v; returnIO v }) ()"],
+				["Recursive flows of non-recursive pipe values","import Control.Concurrent.MVar\nimport GHC.Base ( bindIO )\nf = do\n  a <- newEmptyMVar\n  readMVar a `bindIO` putMVar a"],
+				["Recursive flows of recursive pipe values","import Control.Concurrent.MVar\nimport GHC.Base ( bindIO )\nf = do\n  a <- newEmptyMVar\n  readMVar a `bindIO` (\\x -> putMVar a (():x))"],
+				["Fan-in and fan-out","import Control.Concurrent.MVar\nf = do\n  a <- newEmptyMVar\n  b <- newEmptyMVar\n  c <- newEmptyMVar\n  d <- newEmptyMVar\n  \n  putMVar a ()\n  \n  -- fan-out\n  av <- readMVar a\n  putMVar b av\n  putMVar c (av, ())\n  \n  -- fan-in\n  bv <- readMVar b\n  cv <- readMVar c\n  putMVar d (bv, cv)\n  \n  readMVar d -- expect ((), ((), ()))"],
+				["Higher-level pipe left-hand dependencies","import Control.Concurrent.MVar\nf = do\n  p <- newEmptyMVar\n  q <- newEmptyMVar\n  putMVar p (\\x -> putMVar q x)\n  f <- readMVar p\n  f (\\x -> ((), x))\n  g <- readMVar q\n  return (g ()) -- expect ((), ())"],
+				["Nested pipes","import Control.Concurrent.MVar\nf = do\n  p <- newEmptyMVar\n  q <- newEmptyMVar\n  r <- newMVar p\n  putMVar r q\n  \n  putMVar q 0\n  putMVar p 1\n  \n  s <- readMVar r\n  readMVar s"],
+				["Default-value pipes","\nimport Data.IORef\nf = do\n  v <- newIORef 0\n  writeIORef v 1\n  readIORef v"],
+				["Repetition with pipe constructor aliases","import Control.Concurrent.MVar\nf = newMVar\ng = do\n  v <- f 0\n  w <- f 1\n  v <- readMVar v\n  w <- readMVar w\n  return (v, w) -- expect only (0, 1)"],
+				["Repetition with empty pipe constructor aliases","import Control.Concurrent.MVar\nf = newEmptyMVar\ng = do\n  v <- f\n  w <- f\n  putMVar v 0\n  putMVar w 1\n  v' <- readMVar v\n  w' <- readMVar w\n  return (v', w') -- expect only (0, 1)"],
+				["Lambda recursion through pipe","import Control.Concurrent.MVar\nf = do\n  v <- newEmptyMVar\n  let g _ = do\n        g' <- readMVar v\n        g' ()\n  putMVar v g\n  g ()"],
+				["Value recursion through pipe","import Control.Concurrent.MVar\nf = do\n  v <- newMVar f\n  f' <- readMVar v\n  f'"],
+				["Simple desugared `do` with pipes", "import Prelude hiding ( (>>), (>>=) )\nimport Control.Concurrent.MVar\nimport GHC.Base ( bindIO, thenIO )\n(>>=) = bindIO\n(>>) = thenIO\nf = newEmptyMVar\n  >>= (\\v -> putMVar v () >> readMVar v)"]
+			];
+			
+			function copy_snip(i) {
+				const past_focus = document.activeElement;
+				document.getElementById('snip_copy').value = SNIPS[parseInt(i)][1];
+				document.getElementById('snip_copy').select();
+				document.execCommand('copy');
+				past_focus.focus();
+			}
+			
 			window.addEventListener('load', _ => {
+				CodeMirror.fromTextArea(document.getElementById('pgm'), {
+					lineNumbers: true
+				});
+				document.getElementById('example_snip_buttons').innerHTML = SNIPS.reduce((a, b, i) => a + `<li class="snip-button-wrapper"><span class="snip-button" onClick="copy_snip(${i})">${b[0]}</span></li>`, '');
 				document.getElementById('main_form').addEventListener('submit', e => {
 					e.preventDefault();
 					e.stopPropagation();
 					
+					document.getElementById('submit_loading').className = '';
+					
 					fetch(e.target.action, { method: 'POST', body: e.target.pgm.value }).then(r => {
 						if(r.status >= 400) throw r.text();
 						else return r.json();
-					}).then(([rs_syms, rs_stmts]) => {
+					}).then(J => {
+						rs_syms = J[0]; 
 						// loc = String
 						// symstr = (stack:[loc], String)
 						// sym = (symstr, args:[sym])
 						// syms' -> [sym'] -> [[arg_opt:sym]]
 						
 						// console.log(rs_syms)
-						document.getElementById('results').innerHTML = `<div class="a">${rs_syms.map(sym_ => sym_.map(arg_opt => symprint(arg_opt)).join('</div>\n<div class="b">')).join('</div>\n<div class="a">')}</div>`;
-					}).catch(e_ => e_.then(e => { document.getElementById('results').innerHTML = e; }))
+						document.getElementById('results').className = rs_syms.length > 0 ? '' : 'empty';
+						document.getElementById('results').innerHTML = `<div class="a">${rs_syms.map(sym_ => sym_.map(arg_opt => symprint(arg_opt)).join('</div>\n<div class="b">')).join('</div>\n<div class="a">') || '&lt;empty results&gt;'}</div>`;
+					}).catch(e_ => e_.then(e => { document.getElementById('results').innerHTML = e; document.getElementById('results').className = 'err'; })).finally(_ => {
+						document.getElementById('submit_loading').className = 'invisible';
+					})
 				})
 			})
 		</script>
-		<link rel="stylesheet" href="css/main.css">
+		<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.64.0/codemirror.min.css" />
+		<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.64.0/theme/solarized.min.css" />
+		<link rel="stylesheet" href="css/main.css" />
 	</head>
 	<body>
 		<div id="main">
-			<form action="/f" method="POST" id="main_form">
-				<nav id="main_nav">
-					<a href="https://lam.io" target="_blank"><div class="logo"></div></a>
-					<ul class="flat-list">
-						<li>Ra.hs symbolic analysis engine</li><li><a href="https://github.com/acrylic-origami/ra.hs" target="_blank">Github: code &amp; details</a></li>
-					</ul>
-				</nav>
+			<nav id="main_nav">
+				<a href="https://lam.io" target="_blank"><div class="logo"></div></a>
+				<ul class="flat-list">
+					<li>Ra.hs symbolic analysis engine</li><li><a href="https://github.com/acrylic-origami/ra.hs" target="_blank">Github: code &amp; details</a></li>
+				</ul>
+			</nav>
+			<form action="./f" method="POST" id="main_form">
 				<!-- <h1>Ra.hs symbolic analysis engine</h1> -->
-				<p>Enter Haskell source below. Source may only depend on Prelude.</p>
-				<textarea name="pgm" id="pgm" cols="30" rows="10"></textarea>
-				<button className="input-button">Submit</button>
-				<div><code id="results"></code></div>
+				<div id="explanation">
+					<p>
+						<b>ra.hs</b> is a static symbolic execution engine for Haskell. It is like a "dry-run" of a Haskell program. To be more specific, it differs from a compiler/runtime in a few basic ways:
+					</p>
+					<ol>
+						<li>It takes all possible branches to accumulate the entire set of return values, similar to type analysis;</li>
+						<li>Program traversal stops at recursion, meaning analysis <em>always</em> halts and never produces recursive structures (e.g. lists);</li>
+						<li>There is no IO.</li>
+					</ol>
+				</div>
+				<hr />
+				<p><em>Enter Haskell source below to try ra.hs.</em> Source must only depend on Prelude. Hover over results to see their stack.</p>
+				<section id="pgm_section">
+					<div id="pgm_wrapper">
+						<button class="input-button">Submit</button>
+						<textarea name="pgm" id="pgm" cols="30" rows="10"></textarea>
+					</div>
+					<div id="example_snips">
+						<h2>Examples</h2>
+						<p>Click any of the buttons below to <em>copy the snippet to clipboard</em>.</p>
+						<textarea id="snip_copy" class="hidden"></textarea>
+						<ul id="example_snip_buttons" class="flat-list"></ul>
+					</div>
+				</section>
 			</form>
+			
+			<section id="results_section">
+				<h2>Results:</h2>
+				<span id="submit_loading" class="invisible">Typechecking...</span>
+				<div><code id="results"></code></div>
+			</section>
 		</div>
 	</body>
 </html>
