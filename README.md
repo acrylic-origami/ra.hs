@@ -2,6 +2,8 @@
 
 ra.hs is <b>R</b>eactive <b>A</b>nalytics for Haskell. It is a non-recursive [symbolic execution engine](https://en.wikipedia.org/wiki/Symbolic_execution) that understands threads and thread-safe shared variables. It steps through the AST of a program to find possible non-recursive values at points in the program, including those that come from things like `IORef`. ra.hs then tracks forks to identify what threads are writing where.
 
+**Try it at <http://stacker.lam.io/ra.hs/>**
+
 Symbolic analysis can be thought of as sitting somewhere between typechecking and execution. It is able to reduce some regions of the typechecked AST by brute-forcing all possible branches and guards, provided that there exist values in the execution context/stack to fulfill pattern matches. On the other hand, the analysis is totally static, and in this engine, it is also non-recursive. By design, ra.hs should also always halt.
 
 ## Basic examples
